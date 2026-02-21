@@ -4946,15 +4946,31 @@ function endorseSkill(skillId) {
 function displayAttachments(attachments) {
     if (!attachments || attachments.length === 0) return '';
 
-    // Separate images, audio, and other files
+    const extOf = (value) => {
+        const raw = String(value || '').split('?')[0].split('#')[0];
+        const parts = raw.split('.');
+        if (parts.length < 2) return '';
+        return (parts.pop() || '').toLowerCase();
+    };
+
+    // Separate images, audio, video, and other files
     const images = [];
     const audioFiles = [];
+    const videoFiles = [];
     const others = [];
     attachments.forEach(att => {
-        if (att.type && att.type.startsWith('image/')) {
+        const mime = String((att && att.type) || '').toLowerCase();
+        const ext = extOf((att && att.name) || (att && att.url) || '');
+        const isImage = mime.startsWith('image/') || ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg', 'avif'].includes(ext);
+        const isAudio = mime.startsWith('audio/') || ['mp3', 'wav', 'aac', 'm4a', 'flac', 'oga', 'opus', 'weba'].includes(ext);
+        const isVideo = mime.startsWith('video/') || ['mp4', 'webm', 'ogv', 'm4v', 'mov'].includes(ext);
+
+        if (isImage) {
             images.push(att);
-        } else if (att.type && att.type.startsWith('audio/')) {
+        } else if (isAudio) {
             audioFiles.push(att);
+        } else if (isVideo) {
+            videoFiles.push(att);
         } else {
             others.push(att);
         }
@@ -4995,7 +5011,40 @@ function displayAttachments(attachments) {
         `;
     });
 
-    // Render non-image, non-audio attachments
+    // Inline HTML5 video player for common browser-compatible formats
+    // (mp4/webm/ogv/m4v/mov and video/* MIME types).
+    videoFiles.forEach(att => {
+        const hasUrl = att.url && String(att.url).trim();
+        const safeName = (att.name || 'video').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+        const escapedUrl = hasUrl ? String(att.url).replace(/"/g, '&quot;').replace(/'/g, "\\'") : '';
+        const downloadBtn = hasUrl
+            ? `<div class="d-flex align-items-center gap-2 ms-2">
+                    <a href="${att.url}" class="btn btn-sm btn-outline-primary" download="${safeName}"><i class="bi bi-download"></i> Download</a>
+                    <button class="btn btn-sm btn-outline-secondary" onclick="openFileAccessInspector('${escapedUrl}')" title="Inspect access"><i class="bi bi-shield-lock"></i></button>
+               </div>`
+            : notOnDeviceMsg;
+        const videoPlayer = hasUrl
+            ? `<video controls preload="metadata" playsinline class="mt-2 w-100" style="max-width:100%;border-radius:10px;background:#000;">
+                    <source src="${att.url.replace(/"/g, '&quot;')}" type="${(att.type || 'video/mp4').replace(/"/g, '&quot;')}">
+                    Your browser does not support the video element.
+               </video>`
+            : '';
+        html += `
+            <div class="attachment-item mb-2 p-2 border rounded">
+                <div class="d-flex align-items-center flex-wrap">
+                    <i class="bi bi-camera-video me-2"></i>
+                    <div class="flex-grow-1">
+                        <strong>${safeName}</strong>
+                        <small class="text-muted d-block">${(att.type || '').replace(/</g, '&lt;')} • ${formatFileSize(att.size)}</small>
+                        ${videoPlayer}
+                    </div>
+                    ${downloadBtn}
+                </div>
+            </div>
+        `;
+    });
+
+    // Render non-image, non-audio, non-video attachments
     others.forEach(att => {
         const hasUrl = att.url && String(att.url).trim();
         const safeName = (att.name || 'file').replace(/</g, '&lt;').replace(/"/g, '&quot;');

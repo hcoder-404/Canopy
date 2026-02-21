@@ -2095,7 +2095,7 @@
 
                 const attachment = el.closest('.attachment-item');
                 if (attachment) {
-                    const filename = attachment.querySelector('.fw-semibold');
+                    const filename = attachment.querySelector('[data-file-name], .fw-semibold, strong');
                     if (filename && filename.textContent.trim()) return filename.textContent.trim();
                 }
 
