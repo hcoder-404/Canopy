@@ -621,28 +621,54 @@
         function apiCall(url, options = {}) {
             console.log('apiCall:', url, options);
             const csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
-            const defaultOptions = {
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-CSRFToken': csrfToken,
-                    ...options.headers
-                }
+            const method = String(options.method || 'GET').toUpperCase();
+            const isSafeMethod = ['GET', 'HEAD', 'OPTIONS'].includes(method);
+            const headers = { ...(options.headers || {}) };
+            const hasHeader = (name) => Object.keys(headers).some((k) => k.toLowerCase() === name.toLowerCase());
+            const isFormData = typeof FormData !== 'undefined' && options.body instanceof FormData;
+
+            if (!isFormData && !hasHeader('Content-Type')) {
+                headers['Content-Type'] = 'application/json';
+            }
+            if (!isSafeMethod && !hasHeader('X-CSRFToken') && csrfToken) {
+                headers['X-CSRFToken'] = csrfToken;
+            }
+
+            const fetchOptions = {
+                ...options,
+                method,
+                headers,
             };
-            
-            return fetch(url, { ...defaultOptions, ...options })
-                .then(response => {
+
+            return fetch(url, fetchOptions)
+                .then(async (response) => {
                     console.log('apiCall response status:', response.status, 'for URL:', url);
-                    if (!response.ok) {
-                        return response.json().then(err => {
-                            console.error('apiCall error response:', err);
-                            return Promise.reject(err);
-                        });
+
+                    const contentType = (response.headers.get('content-type') || '').toLowerCase();
+                    let payload = {};
+                    if (contentType.includes('application/json')) {
+                        try {
+                            payload = await response.json();
+                        } catch (_) {
+                            payload = {};
+                        }
+                    } else {
+                        const textPayload = await response.text().catch(() => '');
+                        payload = textPayload ? { error: textPayload, message: textPayload } : {};
                     }
-                    return response.json();
-                })
-                .then(data => {
-                    console.log('apiCall success data:', data, 'for URL:', url);
-                    return data;
+
+                    if (!response.ok) {
+                        const errObj = (payload && typeof payload === 'object') ? payload : {};
+                        if (!errObj.error && !errObj.message) {
+                            errObj.error = `Request failed (${response.status})`;
+                        }
+                        errObj.status = response.status;
+                        console.error('apiCall error response:', errObj);
+                        return Promise.reject(errObj);
+                    }
+
+                    console.log('apiCall success data:', payload, 'for URL:', url);
+                    return (payload && typeof payload === 'object') ? payload : {};
                 });
         }
 

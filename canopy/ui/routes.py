@@ -8116,7 +8116,7 @@ def create_ui_blueprint() -> Blueprint:
             db_manager, _, _, _, channel_manager, _, _, _, _, _, p2p_manager = _get_app_components_any(current_app)
             user_id = get_current_user()
             
-            data = request.get_json()
+            data = request.get_json(silent=True) or {}
             message_id = data.get('message_id')
             
             if not message_id:
@@ -9282,14 +9282,22 @@ def create_ui_blueprint() -> Blueprint:
             db_manager, _, _, _, _, _, _, _, _, _, _ = _get_app_components_any(current_app)
             from flask import send_file
             backup_path = db_manager.backup_database(suffix='export')
-            if backup_path and backup_path.exists():
-                return send_file(
-                    str(backup_path),
-                    mimetype='application/x-sqlite3',
-                    as_attachment=True,
-                    download_name=f'canopy_export.db',
-                )
-            return jsonify({'error': 'Export failed'}), 500
+            if not backup_path:
+                return jsonify({'error': 'Export failed: could not create backup'}), 500
+            # Resolve to absolute path so send_file finds the file regardless of cwd
+            abs_path = backup_path.resolve()
+            if not abs_path.exists():
+                logger.error(f"Database export: backup file missing at {abs_path}")
+                return jsonify({'error': 'Export failed: backup file not found'}), 500
+            return send_file(
+                str(abs_path),
+                mimetype='application/x-sqlite3',
+                as_attachment=True,
+                download_name=backup_path.name,
+            )
+        except OSError as e:
+            logger.error(f"Database export error: {e}")
+            return jsonify({'error': 'Export failed: permission or path error'}), 500
         except Exception as e:
             logger.error(f"Database export error: {e}")
             return jsonify({'error': 'Internal server error'}), 500

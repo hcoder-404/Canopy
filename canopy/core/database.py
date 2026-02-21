@@ -657,7 +657,7 @@ class DatabaseManager:
                     pass
 
             logger.info(f"Database backed up to {backup_path.name}")
-            return backup_path
+            return backup_path.resolve()
         except Exception as e:
             logger.error(f"Database backup failed: {e}")
             # Clean up partial backup

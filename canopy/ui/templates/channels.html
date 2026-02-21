@@ -6606,7 +6606,6 @@ function deleteChannelMessage(messageId) {
     
     apiCall('/ajax/delete_channel_message', {
         method: 'POST',
-        headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({ message_id: messageId })
     }).then(data => {
         if (data.success) {
@@ -6618,11 +6617,11 @@ function deleteChannelMessage(messageId) {
                 setTimeout(() => msgEl.remove(), 300);
             }
         } else {
-            alert(data.error || 'Failed to delete message');
+            showAlert(data.error || 'Failed to delete message', 'danger');
         }
     }).catch(err => {
         console.error('Delete error:', err);
-        alert('Failed to delete message');
+        showAlert((err && (err.error || err.message)) || 'Failed to delete message', 'danger');
     });
 }
 

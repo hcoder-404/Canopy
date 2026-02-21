@@ -402,7 +402,7 @@
                 <div class="row">
                     <div class="col-md-4">
                         <div class="d-grid">
-                            <button class="btn btn-outline-warning" onclick="cleanupDatabase()">
+                            <button class="btn btn-outline-warning" id="cleanup-db-btn" onclick="cleanupDatabase()">
                                 <i class="bi bi-trash"></i> Cleanup Database
                             </button>
                             <small class="text-muted mt-1">Remove old messages and expired data</small>
@@ -411,7 +411,7 @@
                     
                     <div class="col-md-4">
                         <div class="d-grid">
-                            <button class="btn btn-outline-info" onclick="exportData()">
+                            <button class="btn btn-outline-info" id="export-data-btn" onclick="exportData()">
                                 <i class="bi bi-download"></i> Export Data
                             </button>
                             <small class="text-muted mt-1">Download your data for backup</small>
@@ -420,7 +420,7 @@
                     
                     <div class="col-md-4">
                         <div class="d-grid">
-                            <button class="btn btn-outline-danger" onclick="resetSystem()">
+                            <button class="btn btn-outline-danger" id="reset-system-btn" onclick="resetSystem()">
                                 <i class="bi bi-arrow-clockwise"></i> Reset System
                             </button>
                             <small class="text-muted mt-1">Clear all data and start fresh</small>
@@ -538,6 +538,34 @@ export CANOPY_AUTO_APPROVE_AGENTS=1</code></pre>
 
 {% block extra_js %}
 <script>
+    function extractErrorMessage(err, fallback) {
+        if (!err) return fallback;
+        if (typeof err === 'string') return err;
+        if (err.error) return err.error;
+        if (err.message) return err.message;
+        return fallback;
+    }
+
+    function setButtonBusy(buttonId, busy, label) {
+        const btn = document.getElementById(buttonId);
+        if (!btn) return;
+        if (!btn.dataset.defaultLabel) {
+            btn.dataset.defaultLabel = btn.innerHTML;
+        }
+        btn.disabled = !!busy;
+        btn.innerHTML = busy ? label : btn.dataset.defaultLabel;
+    }
+
+    function parseDownloadFilename(contentDisposition) {
+        if (!contentDisposition) return '';
+        const utf8Match = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i);
+        if (utf8Match && utf8Match[1]) {
+            return decodeURIComponent(utf8Match[1].replace(/^"(.*)"$/, '$1'));
+        }
+        const asciiMatch = contentDisposition.match(/filename="?([^"]+)"?/i);
+        return asciiMatch && asciiMatch[1] ? asciiMatch[1] : '';
+    }
+
     function refreshSettings() {
         window.location.reload();
     }
@@ -546,7 +574,8 @@ export CANOPY_AUTO_APPROVE_AGENTS=1</code></pre>
         if (!confirm('This will remove old messages and expired data older than 30 days.\n\nYour recent messages and data will be preserved. Continue?')) {
             return;
         }
-        
+
+        setButtonBusy('cleanup-db-btn', true, '<i class="bi bi-hourglass-split"></i> Cleaning...');
         apiCall('/ajax/database_cleanup', {
             method: 'POST',
             body: JSON.stringify({ days: 30 })
@@ -558,22 +587,79 @@ export CANOPY_AUTO_APPROVE_AGENTS=1</code></pre>
                 showAlert('Cleanup failed: ' + (data.error || 'Unknown error'), 'danger');
             }
         })
-        .catch(err => showAlert('Cleanup failed: ' + (err.message || err), 'danger'));
+        .catch(err => showAlert('Cleanup failed: ' + extractErrorMessage(err, 'Unknown error'), 'danger'))
+        .finally(() => setButtonBusy('cleanup-db-btn', false));
     }
     
-    function exportData() {
-        window.location.href = '/ajax/database_export';
+    async function exportData() {
+        setButtonBusy('export-data-btn', true, '<i class="bi bi-hourglass-split"></i> Preparing...');
+        try {
+            const response = await fetch('/ajax/database_export', {
+                method: 'GET',
+                credentials: 'same-origin',
+                headers: {
+                    'X-Requested-With': 'XMLHttpRequest'
+                }
+            });
+
+            if (!response.ok) {
+                let message = `Export failed (${response.status})`;
+                const contentType = response.headers.get('Content-Type') || '';
+                if (contentType.includes('application/json')) {
+                    const payload = await response.json();
+                    message = payload.error || payload.message || message;
+                }
+                throw new Error(message);
+            }
+
+            const contentType = (response.headers.get('Content-Type') || '').toLowerCase();
+            if (contentType.includes('application/json')) {
+                const payload = await response.json();
+                throw new Error(payload.error || payload.message || 'Export failed');
+            }
+            if (contentType.includes('text/html')) {
+                throw new Error('Export did not return a database file. Your session may have expired; reload and sign in again.');
+            }
+
+            const blob = await response.blob();
+            if (!blob || blob.size === 0) {
+                throw new Error('Export file was empty');
+            }
+
+            const contentDisposition = response.headers.get('Content-Disposition') || '';
+            const headerName = parseDownloadFilename(contentDisposition);
+            const fallbackName = `canopy_export_${new Date().toISOString().replace(/[-:]/g, '').split('.')[0]}.db`;
+            const downloadName = headerName || fallbackName;
+
+            const url = window.URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = downloadName;
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            window.URL.revokeObjectURL(url);
+
+            showAlert(`Export prepared: ${downloadName}`, 'success');
+        } catch (err) {
+            showAlert('Export failed: ' + extractErrorMessage(err, 'Unknown error'), 'danger');
+        } finally {
+            setButtonBusy('export-data-btn', false);
+        }
     }
     
     function resetSystem() {
         if (!confirm('⚠️ DANGER: This will DELETE ALL DATA including messages, users, settings, and trust scores.\n\nThis action CANNOT be undone.\n\nAre you absolutely sure you want to reset the entire system?')) {
             return;
         }
-        
-        if (!confirm('This is your FINAL WARNING.\n\nAll data will be permanently deleted and cannot be recovered.\n\nType YES in your mind and click OK to proceed.')) {
+
+        const finalConfirmation = prompt('FINAL WARNING: Type RESET to permanently clear all data.');
+        if (finalConfirmation !== 'RESET') {
+            showAlert('Reset canceled. Exact confirmation text was not provided.', 'info');
             return;
         }
-        
+
+        setButtonBusy('reset-system-btn', true, '<i class="bi bi-hourglass-split"></i> Resetting...');
         apiCall('/ajax/system_reset', { method: 'POST' })
         .then(data => {
             if (data.success) {
@@ -583,7 +669,8 @@ export CANOPY_AUTO_APPROVE_AGENTS=1</code></pre>
                 showAlert('Reset failed: ' + (data.error || 'Unknown error'), 'danger');
             }
         })
-        .catch(err => showAlert('Reset failed: ' + (err.message || err), 'danger'));
+        .catch(err => showAlert('Reset failed: ' + extractErrorMessage(err, 'Unknown error'), 'danger'))
+        .finally(() => setButtonBusy('reset-system-btn', false));
     }
 
     // ---- Device Profile ----
@@ -755,9 +842,13 @@ export CANOPY_AUTO_APPROVE_AGENTS=1</code></pre>
             return;
         }
 
-        fetch('/ui/ajax/set_landing', {
+        const csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
+        fetch('/ajax/set_landing', {
             method: 'POST',
-            headers: {'Content-Type': 'application/json'},
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': csrfToken,
+            },
             body: JSON.stringify({page: page})
         })
         .then(r => r.json())
