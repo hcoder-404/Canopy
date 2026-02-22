@@ -65,6 +65,14 @@ def _normalize_handles(handles: Sequence[str]) -> List[str]:
     return ordered
 
 
+def _normalize_display_handle(display_name: Optional[str]) -> str:
+    """Normalize display_name to a mention handle: trim, collapse spaces, replace with underscore.
+    Must match SQL normalization used in _query so resolution is consistent."""
+    if not display_name:
+        return ""
+    return "_".join(str(display_name).strip().split())
+
+
 def _lower_handles(handles: Sequence[str]) -> List[str]:
     """Lowercase handles while preserving order (case-insensitive dedupe)."""
     cleaned = []
@@ -99,6 +107,14 @@ def resolve_mention_targets(
     if not handles_raw:
         return []
 
+    # Normalize display_name for matching: TRIM + collapse multiple spaces + space to underscore.
+    # Must match _normalize_display_handle() so DB and Python comparison agree.
+    _norm_display_u = (
+        "REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(TRIM(COALESCE(u.display_name,'')), '  ', ' '), '  ', ' '), '  ', ' '), '  ', ' '), ' ', '_')"
+    )
+    _norm_display = (
+        "REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(TRIM(COALESCE(display_name,'')), '  ', ' '), '  ', ' '), '  ', ' '), '  ', ' '), ' ', '_')"
+    )
     try:
         with db_manager.get_connection() as conn:
             def _query(handles_list: Sequence[str], case_sensitive: bool) -> List[Any]:
@@ -116,8 +132,8 @@ def resolve_mention_targets(
                         WHERE cm.channel_id = ?
                           AND u.id NOT IN ('system', 'local_user')
                           AND (u.id IN ({placeholders})
-                               OR u.username IN ({placeholders})
-                               OR REPLACE(u.display_name, ' ', '_') IN ({placeholders}))
+                               OR TRIM(COALESCE(u.username,'')) IN ({placeholders})
+                               OR {_norm_display_u} IN ({placeholders}))
                         """
                     else:
                         sql = f"""
@@ -128,8 +144,8 @@ def resolve_mention_targets(
                         WHERE cm.channel_id = ?
                           AND u.id NOT IN ('system', 'local_user')
                           AND (LOWER(u.id) IN ({placeholders})
-                               OR LOWER(u.username) IN ({placeholders})
-                               OR LOWER(REPLACE(u.display_name, ' ', '_')) IN ({placeholders}))
+                               OR LOWER(TRIM(COALESCE(u.username,''))) IN ({placeholders})
+                               OR LOWER({_norm_display_u}) IN ({placeholders}))
                         """
                     return cast(List[Any], conn.execute(sql, params).fetchall())
                 else:
@@ -140,8 +156,8 @@ def resolve_mention_targets(
                         FROM users
                         WHERE id NOT IN ('system', 'local_user')
                           AND (id IN ({placeholders})
-                               OR username IN ({placeholders})
-                               OR REPLACE(display_name, ' ', '_') IN ({placeholders}))
+                               OR TRIM(COALESCE(username,'')) IN ({placeholders})
+                               OR {_norm_display} IN ({placeholders}))
                         """
                     else:
                         sql = f"""
@@ -149,8 +165,8 @@ def resolve_mention_targets(
                         FROM users
                         WHERE id NOT IN ('system', 'local_user')
                           AND (LOWER(id) IN ({placeholders})
-                               OR LOWER(username) IN ({placeholders})
-                               OR LOWER(REPLACE(display_name, ' ', '_')) IN ({placeholders}))
+                               OR LOWER(TRIM(COALESCE(username,''))) IN ({placeholders})
+                               OR LOWER({_norm_display}) IN ({placeholders}))
                         """
                     return cast(List[Any], conn.execute(sql, params).fetchall())
 
@@ -160,15 +176,15 @@ def resolve_mention_targets(
             for row in exact_rows:
                 try:
                     row_id = row['id']
-                    row_username = row['username']
+                    row_username = (row['username'] or '').strip()
                     row_display = row['display_name'] or ''
                 except Exception:
                     row_id = row[0]
-                    row_username = row[1]
+                    row_username = (row[1] or '').strip() if len(row) > 1 else ''
                     row_display = row[2] if len(row) > 2 else ''
-                display_handle = row_display.replace(' ', '_') if row_display else ''
+                display_handle = _normalize_display_handle(row_display)
                 for handle in handles_raw:
-                    if handle == row_id or handle == row_username or (display_handle and handle == display_handle):
+                    if handle == row_id or (row_username and handle == row_username) or (display_handle and handle == display_handle):
                         exact_handles.add(handle)
                 rows.append(row)
 

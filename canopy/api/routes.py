@@ -5293,9 +5293,36 @@ def create_api_blueprint() -> Blueprint:
             messages = channel_manager.get_channel_messages(
                 channel_id, g.api_key_info.user_id, limit, before_message_id
             )
-            
+            # Enrich with author display_name/username so agents don't mis-resolve user_id -> handle
+            db_manager, _, _, _, _, _, _, _, profile_manager, _, _ = _get_app_components_any(current_app)
+            out = []
+            for message in messages:
+                d = message.to_dict()
+                uid = d.get('user_id')
+                dname = uid
+                uname = uid
+                if uid:
+                    if profile_manager:
+                        try:
+                            prof = profile_manager.get_profile(uid)
+                            if prof:
+                                dname = (prof.display_name or prof.username or uid)
+                                uname = (prof.username or uid)
+                        except Exception:
+                            pass
+                    if (dname == uid or uname == uid) and db_manager:
+                        try:
+                            row = db_manager.get_user(uid)
+                            if row:
+                                dname = (row.get('display_name') or row.get('username') or uid)
+                                uname = (row.get('username') or uid)
+                        except Exception:
+                            pass
+                d['display_name'] = dname
+                d['username'] = uname
+                out.append(d)
             return jsonify({
-                'messages': [message.to_dict() for message in messages],
+                'messages': out,
                 'channel_id': channel_id,
                 'count': len(messages)
             })

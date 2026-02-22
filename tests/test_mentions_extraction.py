@@ -22,7 +22,7 @@ if 'zeroconf' not in sys.modules:
     zeroconf_stub.ServiceStateChange = _Dummy
     sys.modules['zeroconf'] = zeroconf_stub
 
-from canopy.core.mentions import extract_mentions
+from canopy.core.mentions import extract_mentions, _normalize_display_handle, resolve_mention_targets
 
 
 class TestMentionExtraction(unittest.TestCase):
@@ -43,6 +43,18 @@ class TestMentionExtraction(unittest.TestCase):
     def test_ignores_embedded_non_boundary_at_signs(self) -> None:
         text = "foo@bar should not match, but (@agent_ok) should."
         self.assertEqual(extract_mentions(text), ['agent_ok'])
+
+
+class TestNormalizeDisplayHandle(unittest.TestCase):
+    """Regression: display_name with spaces/trim normalizes like SQL so mention resolution matches."""
+
+    def test_collapse_spaces_and_underscore(self) -> None:
+        self.assertEqual(_normalize_display_handle("Codex  Agent"), "Codex_Agent")
+        self.assertEqual(_normalize_display_handle("  Codex  Agent  "), "Codex_Agent")
+
+    def test_empty_or_none(self) -> None:
+        self.assertEqual(_normalize_display_handle(""), "")
+        self.assertEqual(_normalize_display_handle(None), "")
 
 
 if __name__ == '__main__':
