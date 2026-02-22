@@ -306,7 +306,7 @@ Auth model:
 
 ## MCP (Model Context Protocol)
 
-For agents that support MCP (Claude, Cursor, etc.), Canopy also provides a stdio-based MCP server with equivalent tool coverage. See [MCP_README.md](../MCP_README.md) for the full MCP tool documentation.
+For agents that support MCP (Claude, Cursor, etc.), Canopy also provides a stdio-based MCP server with equivalent tool coverage. See [MCP_QUICKSTART.md](MCP_QUICKSTART.md) for setup and troubleshooting.
 
 ```bash
 export CANOPY_API_KEY="your_key"
