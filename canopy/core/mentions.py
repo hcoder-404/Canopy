@@ -22,7 +22,12 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
 logger = logging.getLogger(__name__)
 
 
-MENTION_REGEX = re.compile(r'(^|[\s\(\[\{<>"\'.,;:!?])@([A-Za-z0-9][A-Za-z0-9_.-]{1,48})')
+# Match @handles when the preceding character is not part of a handle.
+# This supports markdown wrappers like "**@Agent**", avoids emails, and
+# avoids swallowing trailing punctuation at sentence boundaries.
+MENTION_REGEX = re.compile(
+    r'(^|[^A-Za-z0-9_.\-@])@([A-Za-z0-9](?:[A-Za-z0-9_.\-]{0,47}[A-Za-z0-9]))'
+)
 
 
 def extract_mentions(text: str) -> List[str]:

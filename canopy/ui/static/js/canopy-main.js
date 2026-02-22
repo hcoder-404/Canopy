@@ -299,7 +299,7 @@
 	        function linkifyMentions(text) {
 	            if (!text || text.indexOf('@') === -1) return text;
 	            const map = (typeof window !== 'undefined' && window.mentionDisplayMap) || {};
-	            const mentionRegex = /(^|[\s\(\[\{<>"'.,;:!?])@([A-Za-z0-9][A-Za-z0-9_.-]{1,48})/g;
+	            const mentionRegex = /(^|[^A-Za-z0-9_.\-@])@([A-Za-z0-9](?:[A-Za-z0-9_.\-]{0,47}[A-Za-z0-9]))/g;
 	            return text.replace(mentionRegex, function(match, prefix, handle) {
 	                var display = map[handle];
 	                if (display == null) display = handle;

@@ -2886,11 +2886,12 @@
             if (!textarea) return null;
             const pos = textarea.selectionStart || 0;
             const before = textarea.value.slice(0, pos);
-            const match = /(^|[\s\(\[\{<>"'.,;:!?])@([A-Za-z0-9_.-]{0,48})$/.exec(before);
+            const match = /(^|[^A-Za-z0-9_.\-@])@([A-Za-z0-9][A-Za-z0-9_.\-]{0,48})?$/.exec(before);
             if (!match) return null;
-            const start = before.length - match[2].length - 1;
+            const query = match[2] || '';
+            const start = before.length - query.length - 1;
             return {
-                query: match[2],
+                query: query,
                 start: start,
                 end: pos
             };
