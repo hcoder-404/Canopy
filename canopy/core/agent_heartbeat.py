@@ -45,6 +45,31 @@ def _to_iso(value: Any) -> Optional[str]:
         return str(value)
 
 
+def _to_seq(value: Any) -> Optional[int]:
+    """Convert datetime-ish values to a monotonic epoch-millisecond hint."""
+    if not value:
+        return None
+    try:
+        if isinstance(value, datetime):
+            dt = value
+        else:
+            raw = str(value).strip()
+            if not raw:
+                return None
+            try:
+                dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except Exception:
+                try:
+                    dt = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S.%f")
+                except Exception:
+                    dt = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S")
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return int(dt.timestamp() * 1000)
+    except Exception:
+        return None
+
+
 def _owner_tokens(user_id: str, username: Optional[str], display_name: Optional[str]) -> list[str]:
     tokens = set()
     for value in (user_id, username, display_name):
@@ -88,8 +113,13 @@ def build_agent_heartbeat_snapshot(
             "agent_user_id": user_id,
             "unacked_mentions": 0,
             "latest_mention_at": None,
+            "last_mention_id": None,
+            "last_mention_seq": None,
             "pending_inbox": 0,
             "latest_inbox_at": None,
+            "last_inbox_id": None,
+            "last_inbox_seq": None,
+            "last_event_seq": None,
             "active_tasks": 0,
             "assigned_open_tasks": 0,
             "assigned_in_progress_tasks": 0,
@@ -110,8 +140,12 @@ def build_agent_heartbeat_snapshot(
 
     unacked_mentions = 0
     latest_mention_at = None
+    last_mention_id = None
+    last_mention_seq = None
     pending_inbox = 0
     latest_inbox_at = None
+    last_inbox_id = None
+    last_inbox_seq = None
     assigned_open_tasks = 0
     assigned_in_progress_tasks = 0
     assigned_blocked_tasks = 0
@@ -155,6 +189,23 @@ def build_agent_heartbeat_snapshot(
                     if row:
                         unacked_mentions = _safe_int(row["count"])
                         latest_mention_at = _to_iso(row["latest"])
+                        last_mention_seq = _to_seq(row["latest"])
+                    latest_row = conn.execute(
+                        """
+                        SELECT id, created_at
+                        FROM mention_events
+                        WHERE user_id = ? AND acknowledged_at IS NULL
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                        """,
+                        (user_id,),
+                    ).fetchone()
+                    if latest_row:
+                        last_mention_id = latest_row["id"]
+                        if not latest_mention_at:
+                            latest_mention_at = _to_iso(latest_row["created_at"])
+                        if last_mention_seq is None:
+                            last_mention_seq = _to_seq(latest_row["created_at"])
                 except Exception:
                     pass
 
@@ -171,6 +222,23 @@ def build_agent_heartbeat_snapshot(
                     if row:
                         pending_inbox = _safe_int(row["count"])
                         latest_inbox_at = _to_iso(row["latest"])
+                        last_inbox_seq = _to_seq(row["latest"])
+                    latest_row = conn.execute(
+                        """
+                        SELECT id, created_at
+                        FROM agent_inbox
+                        WHERE agent_user_id = ? AND status = 'pending'
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                        """,
+                        (user_id,),
+                    ).fetchone()
+                    if latest_row:
+                        last_inbox_id = latest_row["id"]
+                        if not latest_inbox_at:
+                            latest_inbox_at = _to_iso(latest_row["created_at"])
+                        if last_inbox_seq is None:
+                            last_inbox_seq = _to_seq(latest_row["created_at"])
                 except Exception:
                     pass
 
@@ -269,6 +337,8 @@ def build_agent_heartbeat_snapshot(
             unacked_mentions = len(mention_items or [])
             if mention_items:
                 latest_mention_at = mention_items[0].get("created_at")
+                last_mention_id = mention_items[0].get("id")
+                last_mention_seq = _to_seq(mention_items[0].get("created_at"))
         except Exception:
             pass
 
@@ -284,6 +354,8 @@ def build_agent_heartbeat_snapshot(
             )
             if preview:
                 latest_inbox_at = preview[0].get("created_at")
+                last_inbox_id = preview[0].get("id")
+                last_inbox_seq = _to_seq(preview[0].get("created_at"))
         except Exception:
             pass
 
@@ -294,14 +366,24 @@ def build_agent_heartbeat_snapshot(
 
     # Poll faster when actionable work exists.
     poll_hint_seconds = 5 if needs_action else 30
+    last_event_seq = None
+    seq_candidates = [last_mention_seq, last_inbox_seq]
+    seq_values = [s for s in seq_candidates if isinstance(s, int)]
+    if seq_values:
+        last_event_seq = max(seq_values)
 
     return {
         "timestamp": now_iso,
         "agent_user_id": user_id,
         "unacked_mentions": unacked_mentions,
         "latest_mention_at": latest_mention_at,
+        "last_mention_id": last_mention_id,
+        "last_mention_seq": last_mention_seq,
         "pending_inbox": pending_inbox,
         "latest_inbox_at": latest_inbox_at,
+        "last_inbox_id": last_inbox_id,
+        "last_inbox_seq": last_inbox_seq,
+        "last_event_seq": last_event_seq,
         # Backward-compatible key retained; now scoped to assigned actionable tasks.
         "active_tasks": active_tasks,
         "assigned_open_tasks": assigned_open_tasks,

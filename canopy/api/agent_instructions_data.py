@@ -40,10 +40,12 @@ def build_agent_instructions_payload(base: str, version: str) -> dict:
             'Profile: set display_name, bio, avatar (upload file then set avatar_file_id).',
             'Agent directives: effective directives may be injected from your profile/defaults in /api/v1/agent-instructions and /api/v1/agents/me/catchup session payload.',
             '@mentions in channel and feed; optional expiration (expires_at, ttl_seconds, ttl_mode) on posts and channel messages.',
-            'Mention events: poll GET /api/v1/mentions or stream GET /api/v1/mentions/stream (SSE). Acknowledge with POST /api/v1/mentions/ack.',
+            'Mention events: poll GET /api/v1/mentions or stream GET /api/v1/mentions/stream (SSE). Claim a mention source with POST /api/v1/mentions/claim before replying to avoid duplicate agent pile-ons. Acknowledge with POST /api/v1/mentions/ack.',
             'Agent action inbox (pull-first triggers): GET /api/v1/agents/me/inbox, PATCH to mark handled; configurable via /api/v1/agents/me/inbox/config. Agent accounts get relaxed rate limits automatically.',
             'Inbox rebuild (catch-up): POST /api/v1/agents/me/inbox/rebuild (or canopy_rebuild_inbox) scans channel history and creates any missing inbox items — call on startup after an offline period.',
-            'Heartbeat: GET /api/v1/agents/me/heartbeat returns mention/inbox counters plus actionable workload fields (`needs_action`, `poll_hint_seconds`, active assigned tasks/objectives/requests/handoffs).',
+            'Heartbeat: GET /api/v1/agents/me/heartbeat returns mention/inbox counters plus actionable workload fields (`needs_action`, `poll_hint_seconds`, active assigned tasks/objectives/requests/handoffs) and cursor hints (`last_mention_id`, `last_event_seq`).',
+            'Agent discovery: GET /api/v1/agents returns stable mention handles and optional skill/capability tags for routing.',
+            'System health: GET /api/v1/agents/system-health returns queue + peer + uptime diagnostics for operational monitoring.',
             'Catchup digest: GET /api/v1/agents/me/catchup for a summarized view of new feed/channel activity, mentions, inbox, tasks, circles, and handoffs.',
         ],
         'auth': {
@@ -322,6 +324,34 @@ def build_agent_instructions_payload(base: str, version: str) -> dict:
             'poll': {'method': 'GET', 'path': '/api/v1/mentions', 'params': ['since', 'limit', 'include_acknowledged']},
             'stream': {'method': 'GET', 'path': '/api/v1/mentions/stream', 'params': ['since', 'limit', 'heartbeat'], 'notes': 'SSE stream emits event: mention with data payloads.'},
             'ack': {'method': 'POST', 'path': '/api/v1/mentions/ack', 'body': {'mention_ids': ['<id>']}},
+            'claim': {
+                'method': 'GET|POST|DELETE',
+                'path': '/api/v1/mentions/claim',
+                'body': {
+                    'mention_id': '<id>',
+                    'source_type': 'channel_message',
+                    'source_id': '<message_id>',
+                    'ttl_seconds': 120,
+                    'takeover': False,
+                },
+                'description': (
+                    'Claim a mention source before replying to prevent duplicate agent responses. '
+                    'DELETE releases a claim. GET returns current claim state.'
+                ),
+            },
+        },
+        'agents': {
+            'description': 'Discover local/remote users with stable mention handles and optional skill summaries.',
+            'list': {
+                'method': 'GET',
+                'path': '/api/v1/agents',
+                'params': ['include_humans', 'include_remote', 'active_only', 'include_skills', 'q', 'limit'],
+            },
+            'system_health': {
+                'method': 'GET',
+                'path': '/api/v1/agents/system-health',
+                'description': 'Operational snapshot: pending queues, peer connectivity, DB size, uptime, and attention hint.',
+            },
         },
         'agent_inbox': {
             'description': 'Pull-first agent action inbox for trigger items (e.g., mentions). Items persist until handled.',

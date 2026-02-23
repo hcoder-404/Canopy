@@ -47,6 +47,39 @@ def build_preview(text: str, limit: int = 120) -> str:
     return preview
 
 
+def _to_datetime_utc(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        raw = str(value).strip()
+        if not raw:
+            return None
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except Exception:
+            try:
+                dt = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S.%f")
+            except Exception:
+                dt = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S")
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _to_iso_utc(value: Any) -> Optional[str]:
+    try:
+        dt = _to_datetime_utc(value)
+        return dt.isoformat() if dt else None
+    except Exception:
+        return str(value) if value is not None else None
+
+
+def _sqlite_timestamp(value: datetime) -> str:
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
+
+
 def _normalize_handles(handles: Sequence[str]) -> List[str]:
     """Normalize handles while preserving case (case-sensitive dedupe)."""
     cleaned = []
@@ -259,6 +292,9 @@ def split_mention_targets(
 
 class MentionManager:
     """Stores per-user mention events."""
+    DEFAULT_CLAIM_TTL_SECONDS = 120
+    MIN_CLAIM_TTL_SECONDS = 15
+    MAX_CLAIM_TTL_SECONDS = 1800
 
     def __init__(self, db_manager):
         self.db = db_manager
@@ -286,10 +322,373 @@ class MentionManager:
                         ON mention_events(user_id, source_type, source_id);
                     CREATE INDEX IF NOT EXISTS idx_mention_events_user
                         ON mention_events(user_id, created_at);
+
+                    CREATE TABLE IF NOT EXISTS mention_claims (
+                        id TEXT PRIMARY KEY,
+                        source_type TEXT NOT NULL,
+                        source_id TEXT NOT NULL,
+                        channel_id TEXT,
+                        claimed_by_user_id TEXT NOT NULL,
+                        claimed_by_username TEXT,
+                        claimed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        expires_at TIMESTAMP NOT NULL,
+                        released_at TIMESTAMP,
+                        release_reason TEXT,
+                        metadata TEXT,
+                        UNIQUE(source_type, source_id)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_mention_claims_source
+                        ON mention_claims(source_type, source_id);
+                    CREATE INDEX IF NOT EXISTS idx_mention_claims_owner
+                        ON mention_claims(claimed_by_user_id, claimed_at);
                 """)
                 conn.commit()
         except Exception as e:
             logger.error(f"Failed to ensure mention_events table: {e}")
+
+    def _normalize_claim_ttl(self, ttl_seconds: Any) -> int:
+        try:
+            ttl = int(ttl_seconds)
+        except Exception:
+            ttl = self.DEFAULT_CLAIM_TTL_SECONDS
+        ttl = max(self.MIN_CLAIM_TTL_SECONDS, ttl)
+        ttl = min(self.MAX_CLAIM_TTL_SECONDS, ttl)
+        return ttl
+
+    def _serialize_claim_row(self, row: Any, *, now_dt: Optional[datetime] = None) -> Optional[Dict[str, Any]]:
+        if not row:
+            return None
+        now_val = now_dt or datetime.now(timezone.utc)
+        expires_dt = _to_datetime_utc(row['expires_at'] if hasattr(row, '__getitem__') else row[7])
+        claimed_dt = _to_datetime_utc(row['claimed_at'] if hasattr(row, '__getitem__') else row[6])
+        released_dt = _to_datetime_utc(row['released_at'] if hasattr(row, '__getitem__') else row[8])
+        active = bool(expires_dt and expires_dt > now_val and not released_dt)
+        metadata_raw = row['metadata'] if hasattr(row, '__getitem__') else row[10]
+        metadata = None
+        if metadata_raw:
+            try:
+                metadata = json.loads(metadata_raw)
+            except Exception:
+                metadata = None
+        return {
+            'id': row['id'] if hasattr(row, '__getitem__') else row[0],
+            'source_type': row['source_type'] if hasattr(row, '__getitem__') else row[1],
+            'source_id': row['source_id'] if hasattr(row, '__getitem__') else row[2],
+            'channel_id': row['channel_id'] if hasattr(row, '__getitem__') else row[3],
+            'claimed_by_user_id': row['claimed_by_user_id'] if hasattr(row, '__getitem__') else row[4],
+            'claimed_by_username': row['claimed_by_username'] if hasattr(row, '__getitem__') else row[5],
+            'claimed_at': _to_iso_utc(claimed_dt),
+            'expires_at': _to_iso_utc(expires_dt),
+            'released_at': _to_iso_utc(released_dt),
+            'release_reason': row['release_reason'] if hasattr(row, '__getitem__') else row[9],
+            'metadata': metadata,
+            'active': active,
+        }
+
+    def _get_active_claim_row(self, conn: Any, source_type: str, source_id: str) -> Optional[Any]:
+        row = conn.execute(
+            """
+            SELECT id, source_type, source_id, channel_id, claimed_by_user_id,
+                   claimed_by_username, claimed_at, expires_at, released_at,
+                   release_reason, metadata
+            FROM mention_claims
+            WHERE source_type = ? AND source_id = ? AND released_at IS NULL
+            LIMIT 1
+            """,
+            (source_type, source_id),
+        ).fetchone()
+        if not row:
+            return None
+
+        now_dt = datetime.now(timezone.utc)
+        expires_dt = _to_datetime_utc(row['expires_at'] if hasattr(row, '__getitem__') else row[7])
+        if expires_dt and expires_dt > now_dt:
+            return row
+
+        # Expired claim rows are retained for audit visibility but considered inactive.
+        conn.execute(
+            """
+            UPDATE mention_claims
+            SET released_at = ?, release_reason = COALESCE(release_reason, 'expired')
+            WHERE id = ? AND released_at IS NULL
+            """,
+            (_sqlite_timestamp(now_dt), row['id'] if hasattr(row, '__getitem__') else row[0]),
+        )
+        return None
+
+    def get_active_claim(
+        self,
+        source_type: str,
+        source_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Return an active claim for a mention source, if any."""
+        if not source_type or not source_id:
+            return None
+        try:
+            with self.db.get_connection() as conn:
+                row = self._get_active_claim_row(conn, source_type, source_id)
+                conn.commit()
+            return self._serialize_claim_row(row) if row else None
+        except Exception as e:
+            logger.warning(f"Failed to load active mention claim: {e}")
+            return None
+
+    def claim_source(
+        self,
+        source_type: str,
+        source_id: str,
+        claimer_user_id: str,
+        claimer_username: Optional[str] = None,
+        channel_id: Optional[str] = None,
+        ttl_seconds: Any = None,
+        allow_takeover: bool = False,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Claim a mention source so one agent can handle it without duplicate replies."""
+        if not source_type or not source_id or not claimer_user_id:
+            return {'claimed': False, 'reason': 'invalid_request', 'claim': None}
+
+        ttl = self._normalize_claim_ttl(ttl_seconds)
+        now_dt = datetime.now(timezone.utc)
+        expires_dt = now_dt + timedelta(seconds=ttl)
+        claim_meta_json = json.dumps(metadata or {}) if metadata else None
+        now_sql = _sqlite_timestamp(now_dt)
+        expires_sql = _sqlite_timestamp(expires_dt)
+
+        try:
+            with self.db.get_connection() as conn:
+                existing = self._get_active_claim_row(conn, source_type, source_id)
+                if existing:
+                    existing_owner = existing['claimed_by_user_id']
+                    existing_id = existing['id']
+                    if existing_owner == claimer_user_id:
+                        conn.execute(
+                            """
+                            UPDATE mention_claims
+                            SET claimed_by_username = ?, channel_id = COALESCE(?, channel_id),
+                                claimed_at = ?, expires_at = ?, metadata = COALESCE(?, metadata)
+                            WHERE id = ?
+                            """,
+                            (
+                                claimer_username,
+                                channel_id,
+                                now_sql,
+                                expires_sql,
+                                claim_meta_json,
+                                existing_id,
+                            ),
+                        )
+                        row = conn.execute(
+                            """
+                            SELECT id, source_type, source_id, channel_id, claimed_by_user_id,
+                                   claimed_by_username, claimed_at, expires_at, released_at,
+                                   release_reason, metadata
+                            FROM mention_claims WHERE id = ?
+                            """,
+                            (existing_id,),
+                        ).fetchone()
+                        conn.commit()
+                        return {'claimed': True, 'reason': 'renewed', 'claim': self._serialize_claim_row(row, now_dt=now_dt)}
+                    if not allow_takeover:
+                        conn.commit()
+                        return {'claimed': False, 'reason': 'already_claimed', 'claim': self._serialize_claim_row(existing, now_dt=now_dt)}
+
+                    conn.execute(
+                        """
+                        UPDATE mention_claims
+                        SET claimed_by_user_id = ?, claimed_by_username = ?, channel_id = COALESCE(?, channel_id),
+                            claimed_at = ?, expires_at = ?, released_at = NULL, release_reason = NULL,
+                            metadata = COALESCE(?, metadata)
+                        WHERE id = ?
+                        """,
+                        (
+                            claimer_user_id,
+                            claimer_username,
+                            channel_id,
+                            now_sql,
+                            expires_sql,
+                            claim_meta_json,
+                            existing_id,
+                        ),
+                    )
+                    row = conn.execute(
+                        """
+                        SELECT id, source_type, source_id, channel_id, claimed_by_user_id,
+                               claimed_by_username, claimed_at, expires_at, released_at,
+                               release_reason, metadata
+                        FROM mention_claims WHERE id = ?
+                        """,
+                        (existing_id,),
+                    ).fetchone()
+                    conn.commit()
+                    return {'claimed': True, 'reason': 'taken_over', 'claim': self._serialize_claim_row(row, now_dt=now_dt)}
+
+                existing_any = conn.execute(
+                    """
+                    SELECT id
+                    FROM mention_claims
+                    WHERE source_type = ? AND source_id = ?
+                    LIMIT 1
+                    """,
+                    (source_type, source_id),
+                ).fetchone()
+                if existing_any:
+                    existing_id = existing_any['id']
+                    conn.execute(
+                        """
+                        UPDATE mention_claims
+                        SET claimed_by_user_id = ?, claimed_by_username = ?, channel_id = COALESCE(?, channel_id),
+                            claimed_at = ?, expires_at = ?, released_at = NULL, release_reason = NULL,
+                            metadata = COALESCE(?, metadata)
+                        WHERE id = ?
+                        """,
+                        (
+                            claimer_user_id,
+                            claimer_username,
+                            channel_id,
+                            now_sql,
+                            expires_sql,
+                            claim_meta_json,
+                            existing_id,
+                        ),
+                    )
+                    row = conn.execute(
+                        """
+                        SELECT id, source_type, source_id, channel_id, claimed_by_user_id,
+                               claimed_by_username, claimed_at, expires_at, released_at,
+                               release_reason, metadata
+                        FROM mention_claims WHERE id = ?
+                        """,
+                        (existing_id,),
+                    ).fetchone()
+                    conn.commit()
+                    return {'claimed': True, 'reason': 'reclaimed', 'claim': self._serialize_claim_row(row, now_dt=now_dt)}
+
+                claim_id = f"MCL{secrets.token_hex(8)}"
+                conn.execute(
+                    """
+                    INSERT INTO mention_claims
+                    (id, source_type, source_id, channel_id, claimed_by_user_id,
+                     claimed_by_username, claimed_at, expires_at, metadata)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        claim_id,
+                        source_type,
+                        source_id,
+                        channel_id,
+                        claimer_user_id,
+                        claimer_username,
+                        now_sql,
+                        expires_sql,
+                        claim_meta_json,
+                    ),
+                )
+                row = conn.execute(
+                    """
+                    SELECT id, source_type, source_id, channel_id, claimed_by_user_id,
+                           claimed_by_username, claimed_at, expires_at, released_at,
+                           release_reason, metadata
+                    FROM mention_claims WHERE id = ?
+                    """,
+                    (claim_id,),
+                ).fetchone()
+                conn.commit()
+                return {'claimed': True, 'reason': 'claimed', 'claim': self._serialize_claim_row(row, now_dt=now_dt)}
+        except Exception as e:
+            logger.error(f"Failed to claim mention source {source_type}:{source_id}: {e}")
+            return {'claimed': False, 'reason': 'error', 'error': str(e), 'claim': None}
+
+    def release_claim(
+        self,
+        source_type: str,
+        source_id: str,
+        claimer_user_id: Optional[str] = None,
+        reason: str = 'released',
+        force: bool = False,
+    ) -> Dict[str, Any]:
+        """Release an active claim."""
+        if not source_type or not source_id:
+            return {'released': False, 'reason': 'invalid_request', 'claim': None}
+        now_dt = datetime.now(timezone.utc)
+        now_sql = _sqlite_timestamp(now_dt)
+        try:
+            with self.db.get_connection() as conn:
+                row = self._get_active_claim_row(conn, source_type, source_id)
+                if not row:
+                    conn.commit()
+                    return {'released': False, 'reason': 'not_claimed', 'claim': None}
+                owner = row['claimed_by_user_id']
+                if not force and claimer_user_id and owner != claimer_user_id:
+                    conn.commit()
+                    return {'released': False, 'reason': 'not_owner', 'claim': self._serialize_claim_row(row, now_dt=now_dt)}
+                conn.execute(
+                    """
+                    UPDATE mention_claims
+                    SET released_at = ?, release_reason = ?
+                    WHERE id = ? AND released_at IS NULL
+                    """,
+                    (now_sql, reason, row['id']),
+                )
+                updated_row = conn.execute(
+                    """
+                    SELECT id, source_type, source_id, channel_id, claimed_by_user_id,
+                           claimed_by_username, claimed_at, expires_at, released_at,
+                           release_reason, metadata
+                    FROM mention_claims WHERE id = ?
+                    """,
+                    (row['id'],),
+                ).fetchone()
+                conn.commit()
+            return {'released': True, 'reason': reason, 'claim': self._serialize_claim_row(updated_row, now_dt=now_dt)}
+        except Exception as e:
+            logger.error(f"Failed to release mention claim {source_type}:{source_id}: {e}")
+            return {'released': False, 'reason': 'error', 'error': str(e), 'claim': None}
+
+    def release_claims_for_mentions(self, user_id: str, mention_ids: Sequence[str], reason: str = 'acknowledged') -> int:
+        """Release active claims owned by user for the given mention IDs."""
+        ids = [str(mid).strip() for mid in (mention_ids or []) if mid and str(mid).strip()]
+        if not user_id or not ids:
+            return 0
+        released = 0
+        try:
+            with self.db.get_connection() as conn:
+                placeholders = ",".join("?" for _ in ids)
+                refs = conn.execute(
+                    f"""
+                    SELECT DISTINCT source_type, source_id
+                    FROM mention_events
+                    WHERE user_id = ? AND id IN ({placeholders})
+                    """,
+                    [user_id] + ids,
+                ).fetchall()
+                if not refs:
+                    conn.commit()
+                    return 0
+                now_sql = _sqlite_timestamp(datetime.now(timezone.utc))
+                for ref in refs:
+                    cur = conn.execute(
+                        """
+                        UPDATE mention_claims
+                        SET released_at = ?, release_reason = ?
+                        WHERE source_type = ? AND source_id = ?
+                          AND released_at IS NULL
+                          AND claimed_by_user_id = ?
+                        """,
+                        (
+                            now_sql,
+                            reason,
+                            ref['source_type'],
+                            ref['source_id'],
+                            user_id,
+                        ),
+                    )
+                    released += cur.rowcount or 0
+                conn.commit()
+            return released
+        except Exception as e:
+            logger.warning(f"Failed to release mention claims after ack: {e}")
+            return released
 
     def record_mentions(
         self,
@@ -368,10 +767,17 @@ class MentionManager:
         try:
             with self.db.get_connection() as conn:
                 query = """
-                    SELECT id, user_id, source_type, source_id, author_id,
-                           origin_peer, channel_id, preview, metadata,
-                           created_at, acknowledged_at, status
-                    FROM mention_events
+                    SELECT me.id, me.user_id, me.source_type, me.source_id, me.author_id,
+                           me.origin_peer, me.channel_id, me.preview, me.metadata,
+                           me.created_at, me.acknowledged_at, me.status,
+                           mc.id AS claim_id, mc.claimed_by_user_id, mc.claimed_by_username,
+                           mc.claimed_at, mc.expires_at, mc.released_at, mc.release_reason,
+                           mc.metadata AS claim_metadata
+                    FROM mention_events me
+                    LEFT JOIN mention_claims mc
+                      ON mc.source_type = me.source_type
+                     AND mc.source_id = me.source_id
+                     AND mc.released_at IS NULL
                     WHERE user_id = ?
                 """
                 params: List[Any] = [user_id]
@@ -390,36 +796,40 @@ class MentionManager:
         results: List[Dict[str, Any]] = []
         for row in rows:
             try:
-                created_at = row['created_at']
-                ack_at = row['acknowledged_at']
-            except Exception:
-                created_at = row[9]
-                ack_at = row[10]
-
-            created_iso = created_at
-            if created_at:
-                try:
-                    dt = datetime.fromisoformat(str(created_at).replace('Z', '+00:00'))
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=timezone.utc)
-                    created_iso = dt.isoformat()
-                except Exception:
-                    created_iso = created_at
-
-            ack_iso = ack_at
-            if ack_at:
-                try:
-                    dt = datetime.fromisoformat(str(ack_at).replace('Z', '+00:00'))
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=timezone.utc)
-                    ack_iso = dt.isoformat()
-                except Exception:
-                    ack_iso = ack_at
-
-            try:
                 metadata = json.loads(row['metadata']) if row['metadata'] else None
             except Exception:
                 metadata = None
+
+            claim = None
+            claim_id = row['claim_id'] if hasattr(row, '__getitem__') else row[12]
+            if claim_id:
+                claim_metadata_raw = row['claim_metadata'] if hasattr(row, '__getitem__') else row[19]
+                claim_metadata = None
+                if claim_metadata_raw:
+                    try:
+                        claim_metadata = json.loads(claim_metadata_raw)
+                    except Exception:
+                        claim_metadata = None
+                claim_expires_at = _to_datetime_utc(row['expires_at'] if hasattr(row, '__getitem__') else row[16])
+                claim_released_at = _to_datetime_utc(row['released_at'] if hasattr(row, '__getitem__') else row[17])
+                claim_is_active = bool(
+                    claim_expires_at and
+                    claim_expires_at > datetime.now(timezone.utc) and
+                    not claim_released_at
+                )
+                claim_user_id = row['claimed_by_user_id'] if hasattr(row, '__getitem__') else row[13]
+                claim = {
+                    'id': claim_id,
+                    'claimed_by_user_id': claim_user_id,
+                    'claimed_by_username': row['claimed_by_username'] if hasattr(row, '__getitem__') else row[14],
+                    'claimed_at': _to_iso_utc(row['claimed_at'] if hasattr(row, '__getitem__') else row[15]),
+                    'expires_at': _to_iso_utc(row['expires_at'] if hasattr(row, '__getitem__') else row[16]),
+                    'released_at': _to_iso_utc(row['released_at'] if hasattr(row, '__getitem__') else row[17]),
+                    'release_reason': row['release_reason'] if hasattr(row, '__getitem__') else row[18],
+                    'metadata': claim_metadata,
+                    'active': claim_is_active,
+                    'claimed_by_me': bool(claim_user_id and claim_user_id == user_id),
+                }
 
             results.append({
                 'id': row['id'] if hasattr(row, '__getitem__') else row[0],
@@ -431,9 +841,10 @@ class MentionManager:
                 'channel_id': row['channel_id'] if hasattr(row, '__getitem__') else row[6],
                 'preview': row['preview'] if hasattr(row, '__getitem__') else row[7],
                 'metadata': metadata,
-                'created_at': created_iso,
-                'acknowledged_at': ack_iso,
+                'created_at': _to_iso_utc(row['created_at'] if hasattr(row, '__getitem__') else row[9]),
+                'acknowledged_at': _to_iso_utc(row['acknowledged_at'] if hasattr(row, '__getitem__') else row[10]),
                 'status': row['status'] if hasattr(row, '__getitem__') else row[11],
+                'claim': claim,
             })
         return results
 
@@ -445,10 +856,18 @@ class MentionManager:
             with self.db.get_connection() as conn:
                 row = conn.execute(
                     """
-                    SELECT id, user_id, source_type, source_id, author_id,
-                           origin_peer, channel_id, preview, metadata,
-                           created_at, acknowledged_at, status
-                    FROM mention_events WHERE id = ?
+                    SELECT me.id, me.user_id, me.source_type, me.source_id, me.author_id,
+                           me.origin_peer, me.channel_id, me.preview, me.metadata,
+                           me.created_at, me.acknowledged_at, me.status,
+                           mc.id AS claim_id, mc.claimed_by_user_id, mc.claimed_by_username,
+                           mc.claimed_at, mc.expires_at, mc.released_at, mc.release_reason,
+                           mc.metadata AS claim_metadata
+                    FROM mention_events me
+                    LEFT JOIN mention_claims mc
+                      ON mc.source_type = me.source_type
+                     AND mc.source_id = me.source_id
+                     AND mc.released_at IS NULL
+                    WHERE me.id = ?
                     """,
                     (mention_id,),
                 ).fetchone()
@@ -463,16 +882,33 @@ class MentionManager:
         except Exception:
             metadata = None
 
-        def _iso(val: Any) -> Any:
-            if not val:
-                return val
-            try:
-                dt = datetime.fromisoformat(str(val).replace('Z', '+00:00'))
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                return dt.isoformat()
-            except Exception:
-                return val
+        claim = None
+        claim_id = row['claim_id'] if hasattr(row, '__getitem__') else row[12]
+        if claim_id:
+            claim_metadata_raw = row['claim_metadata'] if hasattr(row, '__getitem__') else row[19]
+            claim_metadata = None
+            if claim_metadata_raw:
+                try:
+                    claim_metadata = json.loads(claim_metadata_raw)
+                except Exception:
+                    claim_metadata = None
+            claim_expires_at = _to_datetime_utc(row['expires_at'] if hasattr(row, '__getitem__') else row[16])
+            claim_released_at = _to_datetime_utc(row['released_at'] if hasattr(row, '__getitem__') else row[17])
+            claim = {
+                'id': claim_id,
+                'claimed_by_user_id': row['claimed_by_user_id'] if hasattr(row, '__getitem__') else row[13],
+                'claimed_by_username': row['claimed_by_username'] if hasattr(row, '__getitem__') else row[14],
+                'claimed_at': _to_iso_utc(row['claimed_at'] if hasattr(row, '__getitem__') else row[15]),
+                'expires_at': _to_iso_utc(row['expires_at'] if hasattr(row, '__getitem__') else row[16]),
+                'released_at': _to_iso_utc(row['released_at'] if hasattr(row, '__getitem__') else row[17]),
+                'release_reason': row['release_reason'] if hasattr(row, '__getitem__') else row[18],
+                'metadata': claim_metadata,
+                'active': bool(
+                    claim_expires_at and
+                    claim_expires_at > datetime.now(timezone.utc) and
+                    not claim_released_at
+                ),
+            }
 
         return {
             'id': row['id'] if hasattr(row, '__getitem__') else row[0],
@@ -484,16 +920,18 @@ class MentionManager:
             'channel_id': row['channel_id'] if hasattr(row, '__getitem__') else row[6],
             'preview': row['preview'] if hasattr(row, '__getitem__') else row[7],
             'metadata': metadata,
-            'created_at': _iso(row['created_at'] if hasattr(row, '__getitem__') else row[9]),
-            'acknowledged_at': _iso(row['acknowledged_at'] if hasattr(row, '__getitem__') else row[10]),
+            'created_at': _to_iso_utc(row['created_at'] if hasattr(row, '__getitem__') else row[9]),
+            'acknowledged_at': _to_iso_utc(row['acknowledged_at'] if hasattr(row, '__getitem__') else row[10]),
             'status': row['status'] if hasattr(row, '__getitem__') else row[11],
+            'claim': claim,
         }
 
     def acknowledge_mentions(self, user_id: str, mention_ids: Sequence[str]) -> int:
         """Mark mention events as acknowledged."""
-        ids = [mid for mid in (mention_ids or []) if mid]
+        ids = [str(mid).strip() for mid in (mention_ids or []) if mid and str(mid).strip()]
         if not user_id or not ids:
             return 0
+        released_claims = 0
         try:
             with self.db.get_connection() as conn:
                 placeholders = ",".join("?" for _ in ids)
@@ -506,8 +944,66 @@ class MentionManager:
                     """,
                     params,
                 )
+                updated = cur.rowcount or 0
+                if updated == 0 and ids:
+                    # Diagnose: do these ids exist and for which user_id?
+                    check = conn.execute(
+                        f"""
+                        SELECT id, user_id FROM mention_events
+                        WHERE id IN ({placeholders})
+                        """,
+                        ids,
+                    ).fetchall()
+                    if not check:
+                        logger.warning(
+                            "Mention ack: no rows found for ids=%s (ids may be invalid or from another instance)",
+                            ids[:5],
+                        )
+                    else:
+                        sample_user = check[0]["user_id"] if hasattr(check[0], "__getitem__") else check[0][1]
+                        logger.warning(
+                            "Mention ack: 0 updated for request user_id=%r; sample row user_id=%r (possible user_id mismatch)",
+                            user_id,
+                            sample_user,
+                        )
+                if updated > 0:
+                    try:
+                        now_sql = _sqlite_timestamp(datetime.now(timezone.utc))
+                        ref_rows = conn.execute(
+                            f"""
+                            SELECT DISTINCT source_type, source_id
+                            FROM mention_events
+                            WHERE user_id = ? AND id IN ({placeholders})
+                            """,
+                            [user_id] + ids,
+                        ).fetchall()
+                        for ref in ref_rows or []:
+                            rel_cur = conn.execute(
+                                """
+                                UPDATE mention_claims
+                                SET released_at = ?, release_reason = 'acknowledged'
+                                WHERE source_type = ? AND source_id = ?
+                                  AND released_at IS NULL
+                                  AND claimed_by_user_id = ?
+                                """,
+                                (
+                                    now_sql,
+                                    ref['source_type'],
+                                    ref['source_id'],
+                                    user_id,
+                                ),
+                            )
+                            released_claims += rel_cur.rowcount or 0
+                    except Exception as release_err:
+                        logger.debug(f"Mention claim release on ack failed: {release_err}")
                 conn.commit()
-                return cur.rowcount or 0
+                if released_claims:
+                    logger.debug(
+                        "Mention ack released %d claim(s) for user_id=%s",
+                        released_claims,
+                        user_id,
+                    )
+                return updated
         except Exception as e:
             logger.error(f"Failed to acknowledge mention events: {e}")
             return 0

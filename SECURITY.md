@@ -4,8 +4,8 @@
 
 | Version | Supported |
 |---------|-----------|
-| 0.3.x (latest) | ✅ Active |
-| < 0.3.0 | ❌ No longer supported |
+| 0.4.x (latest) | ✅ Active |
+| < 0.4.0 | ❌ No longer supported |
 
 ---
 

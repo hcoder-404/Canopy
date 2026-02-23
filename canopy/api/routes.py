@@ -55,6 +55,7 @@ from ..security.file_access import evaluate_file_access
 from .agent_instructions_data import build_agent_instructions_payload
 
 logger = logging.getLogger(__name__)
+API_BOOT_TIME = datetime.now(timezone.utc)
 
 
 def _get_app_components_any(app: Any) -> tuple[Any, ...]:
@@ -209,6 +210,39 @@ def create_api_blueprint() -> Blueprint:
         if editor_ids is not None:
             merged['editors'] = editor_ids
         return merged
+
+    def _as_bool(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return False
+        return str(value).strip().lower() in ('1', 'true', 'yes', 'on')
+
+    def _stable_handle_candidates(user_row: dict[str, Any]) -> list[str]:
+        """Return mention handles ordered from most-stable to least-stable."""
+        out: list[str] = []
+
+        def _add(value: Optional[str]) -> None:
+            token = (value or '').strip()
+            if not token:
+                return
+            token = token[1:] if token.startswith('@') else token
+            if not token:
+                return
+            if token not in out:
+                out.append(token)
+
+        username = (user_row.get('username') or '').strip()
+        display_name = (user_row.get('display_name') or '').strip()
+        user_id = (user_row.get('id') or '').strip()
+
+        if username:
+            _add(username.split('.', 1)[0])
+            _add(username)
+        if display_name:
+            _add("_".join(display_name.split()))
+        _add(user_id)
+        return out
 
     _URL_PATTERN = re.compile(r'https?://[^\s<>"\']+')
     _YT_ID_PATTERN = re.compile(r'^[A-Za-z0-9_-]{11}$')
@@ -3655,6 +3689,102 @@ def create_api_blueprint() -> Blueprint:
             logger.error(f"Acknowledge mentions failed: {e}")
             return jsonify({'error': 'Internal server error'}), 500
 
+    @api.route('/mentions/claim', methods=['GET', 'POST', 'DELETE'])
+    @require_auth(Permission.READ_FEED)
+    def mention_claim_api():
+        """Claim/release mention sources to prevent duplicate multi-agent replies."""
+        try:
+            db_manager, _, _, _, _, _, _, _, _, _, _ = _get_app_components_any(current_app)
+            mention_manager = current_app.config.get('MENTION_MANAGER')
+            if not mention_manager:
+                return jsonify({'error': 'Mention manager unavailable'}), 503
+
+            method = request.method
+            data = request.get_json(silent=True) or {}
+            user_id = g.api_key_info.user_id
+            user_row = db_manager.get_user(user_id) if db_manager else None
+            username = None
+            if user_row:
+                username = user_row.get('username') or user_row.get('display_name') or user_id
+
+            mention_id = ''
+            source_type = ''
+            source_id = ''
+            channel_id = None
+            if method == 'GET':
+                mention_id = (request.args.get('mention_id') or '').strip()
+                source_type = (request.args.get('source_type') or '').strip()
+                source_id = (request.args.get('source_id') or '').strip()
+            else:
+                mention_id = (data.get('mention_id') or '').strip()
+                source_type = (data.get('source_type') or '').strip()
+                source_id = (data.get('source_id') or '').strip()
+                channel_id = data.get('channel_id')
+
+            if mention_id:
+                mention = mention_manager.get_mention_by_id(mention_id)
+                if not mention:
+                    return jsonify({'error': 'Mention not found'}), 404
+                if mention.get('user_id') != user_id:
+                    return jsonify({'error': 'Mention does not belong to this user'}), 403
+                source_type = mention.get('source_type') or source_type
+                source_id = mention.get('source_id') or source_id
+                channel_id = mention.get('channel_id') or channel_id
+
+            if not source_type or not source_id:
+                return jsonify({'error': 'source_type and source_id are required (or mention_id)'}), 400
+
+            if method == 'GET':
+                claim = mention_manager.get_active_claim(source_type=source_type, source_id=source_id)
+                return jsonify({
+                    'source_type': source_type,
+                    'source_id': source_id,
+                    'claim': claim,
+                    'claimed': bool(claim and claim.get('active')),
+                })
+
+            if method == 'DELETE':
+                force = bool(data.get('force')) and bool(
+                    g.api_key_info and g.api_key_info.has_permission(Permission.MANAGE_KEYS)
+                )
+                result = mention_manager.release_claim(
+                    source_type=source_type,
+                    source_id=source_id,
+                    claimer_user_id=user_id,
+                    reason='released_by_api',
+                    force=force,
+                )
+                status = 200 if result.get('released') else (409 if result.get('reason') == 'not_owner' else 404)
+                return jsonify({
+                    'source_type': source_type,
+                    'source_id': source_id,
+                    **result,
+                }), status
+
+            # POST (claim)
+            takeover_requested = bool(data.get('takeover')) and bool(
+                g.api_key_info and g.api_key_info.has_permission(Permission.MANAGE_KEYS)
+            )
+            result = mention_manager.claim_source(
+                source_type=source_type,
+                source_id=source_id,
+                claimer_user_id=user_id,
+                claimer_username=username,
+                channel_id=channel_id,
+                ttl_seconds=data.get('ttl_seconds'),
+                allow_takeover=takeover_requested,
+                metadata={'mention_id': mention_id} if mention_id else None,
+            )
+            status = 200 if result.get('claimed') else (409 if result.get('reason') == 'already_claimed' else 400)
+            return jsonify({
+                'source_type': source_type,
+                'source_id': source_id,
+                **result,
+            }), status
+        except Exception as e:
+            logger.error(f"Mention claim API failed: {e}")
+            return jsonify({'error': 'Internal server error'}), 500
+
     @api.route('/mentions/stream', methods=['GET'])
     @require_auth(Permission.READ_FEED)
     def stream_mentions_api():
@@ -3717,6 +3847,265 @@ def create_api_blueprint() -> Blueprint:
             'X-Accel-Buffering': 'no',
         }
         return Response(event_stream(), mimetype='text/event-stream', headers=headers)
+
+    @api.route('/agents', methods=['GET'])
+    @require_auth(Permission.READ_FEED)
+    def list_agents_api():
+        """List discoverable users/agents with stable mention handles and optional skill summaries."""
+        try:
+            db_manager, _, _, _, _, _, _, _, _, _, _ = _get_app_components_any(current_app)
+            skill_manager = current_app.config.get('SKILL_MANAGER')
+            if not db_manager:
+                return jsonify({'agents': [], 'count': 0})
+
+            include_humans = _as_bool(request.args.get('include_humans'))
+            include_remote = _as_bool(request.args.get('include_remote', '1'))
+            active_only = _as_bool(request.args.get('active_only', '1'))
+            include_skills = _as_bool(request.args.get('include_skills', '1'))
+            query = (request.args.get('q') or '').strip().lower()
+            try:
+                limit = int(request.args.get('limit', 100))
+            except Exception:
+                limit = 100
+            limit = max(1, min(limit, 500))
+
+            where = ["id NOT IN ('system', 'local_user')"]
+            params: list[Any] = []
+            if not include_humans:
+                where.append("COALESCE(account_type, 'human') = 'agent'")
+            if active_only:
+                where.append("(status IS NULL OR status = 'active')")
+            if not include_remote:
+                where.append("(origin_peer IS NULL OR TRIM(origin_peer) = '')")
+            if query:
+                where.append(
+                    "("
+                    "LOWER(COALESCE(username, '')) LIKE ? OR "
+                    "LOWER(COALESCE(display_name, '')) LIKE ? OR "
+                    "LOWER(COALESCE(bio, '')) LIKE ?"
+                    ")"
+                )
+                like = f"%{query}%"
+                params.extend([like, like, like])
+
+            with db_manager.get_connection() as conn:
+                rows = conn.execute(
+                    f"""
+                    SELECT id, username, display_name, account_type, status,
+                           origin_peer, bio, created_at
+                    FROM users
+                    WHERE {' AND '.join(where)}
+                    ORDER BY
+                        CASE WHEN COALESCE(account_type, 'human') = 'agent' THEN 0 ELSE 1 END,
+                        CASE WHEN COALESCE(status, 'active') = 'active' THEN 0 ELSE 1 END,
+                        LOWER(COALESCE(display_name, username, id))
+                    LIMIT ?
+                    """,
+                    params + [limit],
+                ).fetchall()
+
+                mention_counts: dict[str, int] = {}
+                inbox_counts: dict[str, int] = {}
+                try:
+                    mention_rows = conn.execute(
+                        """
+                        SELECT user_id, COUNT(*) AS n
+                        FROM mention_events
+                        WHERE acknowledged_at IS NULL
+                        GROUP BY user_id
+                        """
+                    ).fetchall()
+                    for row in mention_rows or []:
+                        mention_counts[str(row['user_id'])] = int(row['n'] or 0)
+                except Exception:
+                    mention_counts = {}
+                try:
+                    inbox_rows = conn.execute(
+                        """
+                        SELECT agent_user_id, COUNT(*) AS n
+                        FROM agent_inbox
+                        WHERE status = 'pending'
+                        GROUP BY agent_user_id
+                        """
+                    ).fetchall()
+                    for row in inbox_rows or []:
+                        inbox_counts[str(row['agent_user_id'])] = int(row['n'] or 0)
+                except Exception:
+                    inbox_counts = {}
+
+            skill_map: dict[str, dict[str, Any]] = {}
+            if include_skills and skill_manager:
+                try:
+                    skills = skill_manager.get_skills(limit=2000)
+                    for skill in skills or []:
+                        author_id = str(skill.get('author_id') or '').strip()
+                        if not author_id:
+                            continue
+                        bucket = skill_map.setdefault(author_id, {'count': 0, 'tags': set(), 'names': set()})
+                        bucket['count'] += 1
+                        for tag in (skill.get('tags') or []):
+                            text = str(tag).strip()
+                            if text:
+                                bucket['tags'].add(text)
+                        name = str(skill.get('name') or '').strip()
+                        if name:
+                            bucket['names'].add(name)
+                except Exception as skill_err:
+                    logger.debug(f"Agent discovery skill summary failed: {skill_err}")
+                    skill_map = {}
+
+            agents: list[dict[str, Any]] = []
+            for row in rows or []:
+                row_dict = {
+                    'id': row['id'],
+                    'username': row['username'],
+                    'display_name': row['display_name'],
+                    'account_type': row['account_type'] or 'human',
+                    'status': row['status'] or 'active',
+                    'origin_peer': row['origin_peer'],
+                    'bio': row['bio'] or '',
+                    'created_at': row['created_at'],
+                }
+                handles = _stable_handle_candidates(row_dict)
+                skill_info = skill_map.get(row_dict['id']) or {}
+                skill_tags = sorted(list(skill_info.get('tags') or []))[:10]
+                skill_names = sorted(list(skill_info.get('names') or []))[:10]
+
+                agents.append({
+                    'user_id': row_dict['id'],
+                    'username': row_dict['username'] or '',
+                    'display_name': row_dict['display_name'] or row_dict['username'] or row_dict['id'],
+                    'account_type': row_dict['account_type'],
+                    'status': row_dict['status'],
+                    'origin_peer': row_dict['origin_peer'],
+                    'is_remote': bool(row_dict['origin_peer']),
+                    'stable_handle': handles[0] if handles else (row_dict['username'] or row_dict['id']),
+                    'mention_handles': handles,
+                    'bio': row_dict['bio'],
+                    'unacked_mentions': mention_counts.get(row_dict['id'], 0),
+                    'pending_inbox': inbox_counts.get(row_dict['id'], 0),
+                    'capabilities': skill_tags,
+                    'skill_count': int(skill_info.get('count') or 0),
+                    'skills': skill_names,
+                    'created_at': row_dict['created_at'],
+                })
+
+            return jsonify({
+                'agents': agents,
+                'count': len(agents),
+                'filters': {
+                    'include_humans': include_humans,
+                    'include_remote': include_remote,
+                    'active_only': active_only,
+                    'include_skills': include_skills,
+                    'query': query,
+                    'limit': limit,
+                },
+            })
+        except Exception as e:
+            logger.error(f"List agents failed: {e}")
+            return jsonify({'error': 'Internal server error'}), 500
+
+    @api.route('/agents/system-health', methods=['GET'])
+    @require_auth(Permission.READ_FEED)
+    def agent_system_health_api():
+        """Operational system health snapshot for agent and admin diagnostics."""
+        try:
+            db_manager, _, _, _, _, _, _, _, _, _, p2p_manager = _get_app_components_any(current_app)
+            now = datetime.now(timezone.utc)
+            uptime_seconds = int(max(0, (now - API_BOOT_TIME).total_seconds()))
+
+            db_size_bytes = None
+            if db_manager and getattr(db_manager, 'db_path', None):
+                try:
+                    db_size_bytes = os.path.getsize(str(db_manager.db_path))
+                except Exception:
+                    db_size_bytes = None
+
+            pending_inbox_total = 0
+            unacked_mentions_total = 0
+            total_users = 0
+            active_agents = 0
+            if db_manager:
+                try:
+                    with db_manager.get_connection() as conn:
+                        row = conn.execute(
+                            "SELECT COUNT(*) AS n FROM agent_inbox WHERE status = 'pending'"
+                        ).fetchone()
+                        pending_inbox_total = int((row['n'] if row else 0) or 0)
+                        row = conn.execute(
+                            "SELECT COUNT(*) AS n FROM mention_events WHERE acknowledged_at IS NULL"
+                        ).fetchone()
+                        unacked_mentions_total = int((row['n'] if row else 0) or 0)
+                        row = conn.execute(
+                            "SELECT COUNT(*) AS n FROM users WHERE id NOT IN ('system', 'local_user')"
+                        ).fetchone()
+                        total_users = int((row['n'] if row else 0) or 0)
+                        row = conn.execute(
+                            """
+                            SELECT COUNT(*) AS n
+                            FROM users
+                            WHERE id NOT IN ('system', 'local_user')
+                              AND COALESCE(account_type, 'human') = 'agent'
+                              AND COALESCE(status, 'active') = 'active'
+                            """
+                        ).fetchone()
+                        active_agents = int((row['n'] if row else 0) or 0)
+                except Exception as db_err:
+                    logger.debug(f"System-health DB metrics failed: {db_err}")
+
+            diagnostics = {}
+            connected_peers = []
+            known_peers_count = 0
+            pending_messages_total = 0
+            sync_queue_depth = 0
+            if p2p_manager:
+                try:
+                    diagnostics = p2p_manager.get_mesh_diagnostics() or {}
+                    connected_peers = diagnostics.get('connected_peers') or p2p_manager.get_connected_peers() or []
+                    known_peers_count = int(diagnostics.get('known_peers_count') or 0)
+                    pending_messages_total = int(((diagnostics.get('pending_messages') or {}).get('total') or 0))
+                    sync_queue_depth = int(((diagnostics.get('sync') or {}).get('queue_depth') or 0))
+                except Exception as mesh_err:
+                    logger.debug(f"System-health mesh diagnostics failed: {mesh_err}")
+                    connected_peers = p2p_manager.get_connected_peers() or []
+                    known_peers_count = len(getattr(getattr(p2p_manager, 'identity_manager', None), 'known_peers', {}) or {})
+
+            needs_attention = any([
+                pending_inbox_total > 1000,
+                unacked_mentions_total > 1000,
+                pending_messages_total > 500,
+                sync_queue_depth > 100,
+            ])
+
+            return jsonify({
+                'timestamp': now.isoformat(),
+                'started_at': API_BOOT_TIME.isoformat(),
+                'uptime_seconds': uptime_seconds,
+                'db': {
+                    'size_bytes': db_size_bytes,
+                },
+                'users': {
+                    'total': total_users,
+                    'active_agents': active_agents,
+                },
+                'queues': {
+                    'unacked_mentions': unacked_mentions_total,
+                    'pending_inbox': pending_inbox_total,
+                    'pending_p2p_messages': pending_messages_total,
+                    'sync_queue_depth': sync_queue_depth,
+                },
+                'peers': {
+                    'connected_count': len(connected_peers or []),
+                    'connected_peers': connected_peers or [],
+                    'known_peers_count': known_peers_count,
+                },
+                'needs_attention': needs_attention,
+                'poll_hint_seconds': 5 if needs_attention else 30,
+            })
+        except Exception as e:
+            logger.error(f"System health failed: {e}")
+            return jsonify({'error': 'Internal server error'}), 500
 
     # Agent action inbox (pull-first triggers)
     @api.route('/agents/me', methods=['GET'])
