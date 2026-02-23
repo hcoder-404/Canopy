@@ -4,6 +4,10 @@
 
 {% block extra_css %}
 <style>
+    :root {
+        --channel-navbar-height: 56px;
+    }
+
     /* Override base.html .main-content padding so the channels
        flex layout fills the full viewport height without overflow */
     .main-content {
@@ -546,6 +550,11 @@
         position: relative;
     }
 
+    .channel-shell {
+        height: 100%;
+        min-height: 0;
+    }
+
     /* Lifespan: single compact row so it doesn't look like three separate controls */
     .channel-lifespan-row {
         display: flex;
@@ -878,7 +887,7 @@
         max-width: 220px;
         transition: margin-left 0.25s ease, opacity 0.2s ease;
         overflow: hidden; /* sidebar itself doesn't scroll */
-        height: calc(100vh - 56px);
+        height: 100%;
         display: flex;
         flex-direction: column;
     }
@@ -904,8 +913,9 @@
     #channel-main {
         flex: 1;
         min-width: 0; /* allow shrink */
+        min-height: 0;
         overflow: hidden; /* contain scroll within children */
-        height: calc(100vh - 56px);
+        height: 100%;
         display: flex;
         flex-direction: column;
     }
@@ -914,7 +924,7 @@
     @media (max-width: 767.98px) {
         #channel-sidebar {
             position: fixed;
-            top: 56px; /* navbar height */
+            top: var(--channel-navbar-height, 56px);
             left: 0;
             bottom: 0;
             z-index: 1040;
@@ -941,50 +951,125 @@
         .channel-toggle-btn { display: inline-flex !important; }
 
         .channel-header {
-            padding: 0.6rem 0.75rem !important;
+            padding: 0.45rem 0.55rem !important;
         }
         .channel-header-row {
-            flex-direction: column;
-            align-items: stretch;
-            gap: 0.5rem;
+            flex-direction: row;
+            align-items: flex-start;
+            gap: 0.4rem;
         }
         .channel-header-left {
-            width: 100%;
+            flex: 1;
+            min-width: 0;
         }
         .channel-header-title h4 {
-            font-size: 1rem;
+            font-size: 0.97rem;
         }
         .channel-header-title small {
-            font-size: 0.78rem;
+            font-size: 0.72rem;
             max-width: 100%;
         }
         .channel-header-right {
-            width: 100%;
-            justify-content: space-between;
-            gap: 0.4rem;
+            flex: 1;
+            min-width: 0;
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            grid-template-areas:
+                "actions controls"
+                "search search";
+            gap: 0.35rem;
+            align-items: center;
         }
         .channel-header-actions,
         .channel-header-controls {
-            width: 100%;
-            justify-content: space-between;
-            gap: 0.4rem;
+            width: auto;
+            gap: 0.3rem;
+        }
+        .channel-header-actions {
+            grid-area: actions;
+            justify-content: flex-start;
+            min-width: 0;
+        }
+        .channel-header-controls {
+            grid-area: controls;
+            justify-content: flex-end;
         }
         .channel-header-search {
+            grid-area: search;
             width: 100%;
         }
         #channel-search-bar {
             width: 100% !important;
         }
+        #channel-search-bar .form-control {
+            min-height: 30px;
+            font-size: 0.82rem;
+            padding-top: 0.2rem;
+            padding-bottom: 0.2rem;
+        }
+        #channel-search-bar .btn {
+            padding: 0.2rem 0.45rem;
+        }
         .channel-privacy-btn {
             min-width: 0;
-            padding-left: 0.5rem;
-            padding-right: 0.5rem;
+            max-width: 170px;
+            padding-left: 0.4rem;
+            padding-right: 0.4rem;
         }
         .channel-privacy-btn .privacy-label {
-            font-size: 0.75rem;
+            font-size: 0.7rem;
+            display: inline-block;
+            max-width: 95px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
         .channel-members-label {
             display: none;
+        }
+        #messages-container {
+            padding: 0.6rem !important;
+        }
+        .channel-composer-wrap {
+            padding: 0.45rem 0.55rem !important;
+            padding-bottom: max(0.55rem, calc(env(safe-area-inset-bottom) + 0.35rem)) !important;
+        }
+        .channel-lifespan-row {
+            margin-bottom: 0.4rem !important;
+            gap: 0.35rem;
+        }
+        .channel-lifespan-label {
+            font-size: 0.68rem;
+        }
+        .channel-expiry-select {
+            min-width: 6.1rem;
+            max-width: 8.4rem;
+        }
+        #message-input {
+            min-height: 36px !important;
+            max-height: 34vh;
+        }
+        #message-form .input-group .btn {
+            padding: 0.35rem 0.48rem;
+        }
+    }
+
+    @media (max-width: 575.98px) {
+        .channel-header-title small {
+            display: none;
+        }
+        .channel-header-title h4 {
+            font-size: 0.92rem;
+        }
+        .channel-privacy-btn .privacy-label {
+            display: none;
+        }
+        .channel-privacy-btn {
+            max-width: none;
+        }
+        .channel-header-actions,
+        .channel-header-controls {
+            gap: 0.22rem;
         }
     }
 
@@ -1004,7 +1089,7 @@
 {% block content %}
 <div class="container-fluid h-100" style="overflow: hidden;">
     <div id="channel-sidebar-backdrop" onclick="toggleChannelSidebar()"></div>
-    <div class="d-flex" style="height: calc(100vh - 56px);">
+    <div class="d-flex channel-shell">
         <!-- Channel Sidebar -->
         <div id="channel-sidebar" class="border-end p-0" style="background: var(--canopy-bg-secondary); border-color: var(--canopy-border) !important;">
             <div class="p-3 border-bottom" style="border-color: var(--canopy-border) !important;">
@@ -3040,6 +3125,13 @@ function toggleChannelSidebar() {
     } else {
         sidebar.classList.toggle('collapsed');
     }
+}
+
+function syncChannelViewportMetrics() {
+    const root = document.documentElement;
+    const navbar = document.querySelector('.navbar');
+    const navHeight = navbar ? Math.ceil(navbar.getBoundingClientRect().height) : 56;
+    root.style.setProperty('--channel-navbar-height', `${Math.max(navHeight, 44)}px`);
 }
 
 function bindChannelItemHandlers() {
@@ -7399,6 +7491,17 @@ document.addEventListener('DOMContentLoaded', function() {
         console.log('Channels page loaded successfully.');
         console.log('Current channel ID:', currentChannelId);
         console.log('Selected files array:', selectedFiles);
+        syncChannelViewportMetrics();
+        window.addEventListener('resize', syncChannelViewportMetrics);
+        window.addEventListener('orientationchange', () => setTimeout(syncChannelViewportMetrics, 120));
+        if (window.visualViewport) {
+            window.visualViewport.addEventListener('resize', syncChannelViewportMetrics);
+        }
+        const navbarCollapse = document.getElementById('navbarNav');
+        if (navbarCollapse) {
+            navbarCollapse.addEventListener('shown.bs.collapse', syncChannelViewportMetrics);
+            navbarCollapse.addEventListener('hidden.bs.collapse', syncChannelViewportMetrics);
+        }
         refreshChannelMentionListOptions();
         renderChannelMentionMacroButtons();
 

@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ---
 
+## [0.3.104] – 2026-02-23
+
+### Changed
+- **Channels mobile refinement:** iPhone Safari usability improvements only: viewport/flex layout so composer is not clipped, dynamic `--channel-navbar-height` sync, compact mobile header (reduced padding/typography, tighter controls), improved composer visibility (capped textarea growth, safe-area padding). Desktop layout unchanged.
+
+---
+
 ## [0.3.103] – 2026-02-23
 
 ### Added
