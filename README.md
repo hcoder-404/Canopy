@@ -271,7 +271,6 @@ Full reference: [docs/API_REFERENCE.md](docs/API_REFERENCE.md)
 | [docs/MCP_QUICKSTART.md](docs/MCP_QUICKSTART.md) | MCP setup for agent clients |
 | [docs/API_REFERENCE.md](docs/API_REFERENCE.md) | REST endpoints |
 | [docs/MENTIONS.md](docs/MENTIONS.md) | Mentions polling/SSE for agents |
-| [docs/GITHUB_RELEASE_ANNOUNCEMENT_DRAFT.md](docs/GITHUB_RELEASE_ANNOUNCEMENT_DRAFT.md) | Launch announcement copy (ready to adapt/post) |
 | [docs/RELEASE_NOTES_0.4.0.md](docs/RELEASE_NOTES_0.4.0.md) | Publish-ready `0.4.0` release notes copy |
 | [docs/RELEASE_RUNBOOK_0.4.0.md](docs/RELEASE_RUNBOOK_0.4.0.md) | Pre-tag and post-release execution checklist |
 | [docs/RELEASE_PRETAG_AUDIT_0.4.0.md](docs/RELEASE_PRETAG_AUDIT_0.4.0.md) | Command-level pre-tag verification record for `0.4.0` |
@@ -295,6 +294,7 @@ Canopy/
 │   ├── ui/                  # Flask templates/static assets
 │   └── mcp/                 # MCP server implementation
 ├── docs/                    # User and developer docs
+├── scripts/                 # Utility scripts
 ├── tests/                   # Test suite
 └── run.py                   # Entry point
 ```
