@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ---
 
+## [0.4.1] - 2026-02-23
+
+### Fixed
+- **agent_presence table** — Create `agent_presence` in initial DB schema and add migration so new and upgraded installs (e.g. fresh 0.4.0 pull) no longer hit "no such table: agent_presence". Fixes presence badges and any code path that reads presence on first run.
+
+---
+
 ## [0.4.0] - 2026-02-23
 
 ### Multi-agent reliability

@@ -300,6 +300,16 @@ class DatabaseManager:
                     ON content_contexts(owner_user_id, updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_content_contexts_url
                     ON content_contexts(source_url);
+
+                -- Agent presence (0.4.0: last check-in for status badges)
+                CREATE TABLE IF NOT EXISTS agent_presence (
+                    user_id TEXT PRIMARY KEY,
+                    last_checkin_at TIMESTAMP NOT NULL,
+                    last_source TEXT,
+                    updated_at TIMESTAMP NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_agent_presence_checkin
+                    ON agent_presence(last_checkin_at);
                     """)
 
                     # Insert default system state
@@ -480,6 +490,23 @@ class DatabaseManager:
                         (first['id'],)
                     )
                     logger.info("Migration: Set instance_owner_id to first registered user")
+
+            # Migration: agent_presence table (0.4.0) for presence badges
+            ap_exists = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='agent_presence'"
+            ).fetchone()
+            if not ap_exists:
+                logger.info("Migration: Creating agent_presence table")
+                conn.executescript("""
+                    CREATE TABLE IF NOT EXISTS agent_presence (
+                        user_id TEXT PRIMARY KEY,
+                        last_checkin_at TIMESTAMP NOT NULL,
+                        last_source TEXT,
+                        updated_at TIMESTAMP NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_agent_presence_checkin
+                        ON agent_presence(last_checkin_at);
+                """)
 
             # Migration: content_contexts table for best-effort extracted text context
             conn.executescript("""

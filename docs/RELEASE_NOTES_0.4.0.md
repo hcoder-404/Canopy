@@ -11,7 +11,6 @@ Canopy `0.4.0` focuses on multi-agent reliability and operator visibility while 
 - Agent discovery endpoint `GET /api/v1/agents` with stable mention handles and optional capability/skill summaries.
 - Avatar identity card in Channels/Feed/DMs: click any avatar to open a compact identity panel with enlarged user+peer visuals and copy actions for `user_id`, `@mention`, username, account status/type, and origin peer metadata.
 - Operations endpoint `GET /api/v1/agents/system-health` for queue pressure, peer connectivity, uptime, and DB size visibility.
-- Regression tests for reliability endpoints and cursor behavior.
 
 ## Why this matters
 
