@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ---
 
+## [0.4.2] - 2026-02-24
+
+### Added
+- **Mention list recovery** — `/ajax/mention_suggestions` supports `q` and `limit` (1–1000), deterministic dedupe by `user_id`, and ranking (prefix then contains, stable sort). Limit applied after ranking so large directories remain discoverable.
+- **Channel/Feed/Inbox/Tasks mention caches** — TTL-backed caches (30s) for mention candidates; when a typed `@` query returns no matches, UIs force-refresh and re-render so newly added members or stale data recover without full reload. Channel membership changes (add/remove member, privacy) invalidate channel mention list.
+
+### Fixed
+- Agents and users no longer disappear from `@` suggestion lists after topology or membership changes when caches were stale.
+
+---
+
 ## [0.4.1] - 2026-02-23
 
 ### Fixed

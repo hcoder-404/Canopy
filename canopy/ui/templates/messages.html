@@ -639,6 +639,9 @@
     let editMessageSelectedFiles = [];
     let editMessageExistingAttachments = [];
     let recipientDirectory = [];
+    let recipientDirectoryLoading = false;
+    let recipientDirectoryFetchedAt = 0;
+    const RECIPIENT_DIRECTORY_TTL_MS = 30000;
     let recipientMatches = [];
     let recipientActiveIndex = -1;
     let selectedRecipients = [];
@@ -967,18 +970,34 @@
         });
     }
 
-    function fetchRecipientDirectory() {
+    function fetchRecipientDirectory(options) {
+        const forceRefresh = !!(options && options.forceRefresh);
+        const isFresh = recipientDirectoryFetchedAt > 0
+            && (Date.now() - recipientDirectoryFetchedAt) < RECIPIENT_DIRECTORY_TTL_MS;
+        if (!forceRefresh && Array.isArray(recipientDirectory) && recipientDirectory.length && isFresh) {
+            return Promise.resolve(recipientDirectory);
+        }
+        if (recipientDirectoryLoading) return Promise.resolve(recipientDirectory);
+        recipientDirectoryLoading = true;
         return fetch('/ajax/mention_suggestions')
             .then(res => res.json())
             .then(data => {
                 if (data && Array.isArray(data.users)) {
                     recipientDirectory = data.users;
-                } else {
+                } else if (!Array.isArray(recipientDirectory)) {
                     recipientDirectory = [];
                 }
+                recipientDirectoryFetchedAt = Date.now();
+                recipientDirectoryLoading = false;
+                return recipientDirectory;
             })
             .catch(() => {
-                recipientDirectory = [];
+                if (!Array.isArray(recipientDirectory)) {
+                    recipientDirectory = [];
+                }
+                recipientDirectoryFetchedAt = Date.now();
+                recipientDirectoryLoading = false;
+                return recipientDirectory;
             });
     }
 
@@ -1111,7 +1130,8 @@
             .slice(0, 8);
     }
 
-    function updateRecipientSuggestions(query) {
+    function updateRecipientSuggestions(query, options) {
+        const opts = options || {};
         const term = query.trim();
         if (!term) {
             recipientMatches = recipientDirectory.filter(rec => rec.user_id && !isRecipientSelected(rec.user_id)).slice(0, 8);
@@ -1120,6 +1140,11 @@
         }
         recipientActiveIndex = recipientMatches.length ? 0 : -1;
         renderRecipientSuggestions();
+        if (!opts.skipRefresh && term && !recipientMatches.length) {
+            fetchRecipientDirectory({ forceRefresh: true }).then(() => {
+                updateRecipientSuggestions(term, { skipRefresh: true });
+            });
+        }
     }
 
     function commitRecipientFromInput(forceValue) {
@@ -1204,7 +1229,9 @@
             updateRecipientSuggestions(value);
         });
         input.addEventListener('focus', (e) => {
-            updateRecipientSuggestions(normalizeRecipientInput(e.target.value || ''));
+            fetchRecipientDirectory().then(() => {
+                updateRecipientSuggestions(normalizeRecipientInput(e.target.value || ''));
+            });
         });
         input.addEventListener('keydown', handleRecipientKeydown);
 

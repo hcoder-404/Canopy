@@ -3214,6 +3214,8 @@
 	    let tagSuggestionsLoaded = false;
 	    let feedMentionCandidates = null;
 	    let feedMentionLoading = false;
+        let feedMentionCandidatesFetchedAt = 0;
+        const FEED_MENTION_CACHE_TTL_MS = 30000;
 	    let feedMentionContext = null;
         let feedChannelCandidates = null;
         let feedChannelLoading = false;
@@ -3257,28 +3259,64 @@
             };
         }
 
-        function fetchFeedMentionCandidates() {
-            if (feedMentionCandidates || feedMentionLoading) {
+        function fetchFeedMentionCandidates(options) {
+            const forceRefresh = !!(options && options.forceRefresh);
+            const isFresh = feedMentionCandidatesFetchedAt > 0
+                && (Date.now() - feedMentionCandidatesFetchedAt) < FEED_MENTION_CACHE_TTL_MS;
+            if (!forceRefresh && Array.isArray(feedMentionCandidates) && isFresh) {
                 return Promise.resolve(feedMentionCandidates || []);
             }
+            if (feedMentionLoading) return Promise.resolve(feedMentionCandidates || []);
             feedMentionLoading = true;
             return apiCall('/ajax/mention_suggestions')
                 .then(data => {
                     feedMentionLoading = false;
                     if (data && data.success && Array.isArray(data.users)) {
                         feedMentionCandidates = data.users;
-                    } else {
+                    } else if (!Array.isArray(feedMentionCandidates)) {
                         feedMentionCandidates = [];
                     }
+                    feedMentionCandidatesFetchedAt = Date.now();
                     renderFeedMentionMacroButtons();
                     return feedMentionCandidates;
                 })
                 .catch(() => {
                     feedMentionLoading = false;
-                    feedMentionCandidates = [];
+                    if (!Array.isArray(feedMentionCandidates)) {
+                        feedMentionCandidates = [];
+                    }
+                    feedMentionCandidatesFetchedAt = Date.now();
                     renderFeedMentionMacroButtons();
-                    return [];
+                    return feedMentionCandidates;
                 });
+        }
+
+        function getFeedMentionMatches(candidates, query, limit) {
+            const needle = String(query || '').trim().toLowerCase();
+            const max = Number(limit || 8);
+            const scored = (Array.isArray(candidates) ? candidates : []).map(item => {
+                if (!item) return null;
+                const label = String(item.display_name || '').toLowerCase();
+                const username = String(item.username || '').toLowerCase();
+                const handle = String(item.handle || '').toLowerCase();
+                const userId = String(item.user_id || '').toLowerCase();
+                if (!needle) {
+                    return { item, score: 5, label: label || username || userId };
+                }
+                let score = -1;
+                if (handle.startsWith(needle) || username.startsWith(needle)) score = 0;
+                else if (label.startsWith(needle) || userId.startsWith(needle)) score = 1;
+                else if (handle.includes(needle) || username.includes(needle)) score = 2;
+                else if (label.includes(needle) || userId.includes(needle)) score = 3;
+                if (score < 0) return null;
+                return { item, score, label: label || username || userId };
+            }).filter(Boolean);
+
+            scored.sort((a, b) => {
+                if (a.score !== b.score) return a.score - b.score;
+                return a.label.localeCompare(b.label);
+            });
+            return scored.slice(0, max).map(entry => entry.item);
         }
 
         function normalizeMentionAccountType(accountType) {
@@ -3913,14 +3951,15 @@
                 hideFeedChannelSuggestions();
                 fetchFeedMentionCandidates().then(candidates => {
                     const q = (mentionContext.query || '').toLowerCase();
-                    const matches = candidates.filter(item => {
-                        const name = (item.display_name || '').toLowerCase();
-                        const username = (item.username || '').toLowerCase();
-                        const handle = (item.handle || '').toLowerCase();
-                        const userId = (item.user_id || '').toLowerCase();
-                        if (!q) return true;
-                        return name.includes(q) || username.includes(q) || handle.includes(q) || userId.includes(q);
-                    }).slice(0, 6);
+                    const matches = getFeedMentionMatches(candidates, q, 8);
+                    if (q && !matches.length) {
+                        fetchFeedMentionCandidates({ forceRefresh: true }).then(refreshed => {
+                            const refreshedMatches = getFeedMentionMatches(refreshed, q, 8);
+                            feedMentionContext = mentionContext;
+                            renderFeedMentionSuggestions(refreshedMatches, mentionContext);
+                        });
+                        return;
+                    }
                     feedMentionContext = mentionContext;
                     renderFeedMentionSuggestions(matches, mentionContext);
                 });

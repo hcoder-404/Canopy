@@ -416,10 +416,19 @@ def create_ui_blueprint() -> Blueprint:
                     INSERT OR IGNORE INTO channel_members (channel_id, user_id, role)
                     VALUES ('general', ?, 'member')
                 """, (user_id,))
-                # Also join all existing public channels so P2P messages are visible
-                public_channels = conn.execute(
-                    "SELECT id FROM channels WHERE channel_type = 'public'"
-                ).fetchall()
+                # Also join existing open/public channels so P2P messages are visible.
+                # Do not auto-join targeted/restricted channels.
+                try:
+                    public_channels = conn.execute(
+                        "SELECT id FROM channels "
+                        "WHERE channel_type = 'public' "
+                        "  AND COALESCE(privacy_mode, 'open') = 'open'"
+                    ).fetchall()
+                except Exception:
+                    # Backward compatibility for legacy schemas without privacy_mode.
+                    public_channels = conn.execute(
+                        "SELECT id FROM channels WHERE channel_type = 'public'"
+                    ).fetchall()
                 for (ch_id,) in public_channels:
                     conn.execute("""
                         INSERT OR IGNORE INTO channel_members (channel_id, user_id, role)
@@ -501,9 +510,17 @@ def create_ui_blueprint() -> Blueprint:
                     INSERT OR IGNORE INTO channel_members (channel_id, user_id, role)
                     VALUES ('general', ?, 'member')
                 """, (user_id,))
-                public_channels = conn.execute(
-                    "SELECT id FROM channels WHERE channel_type = 'public'"
-                ).fetchall()
+                try:
+                    public_channels = conn.execute(
+                        "SELECT id FROM channels "
+                        "WHERE channel_type = 'public' "
+                        "  AND COALESCE(privacy_mode, 'open') = 'open'"
+                    ).fetchall()
+                except Exception:
+                    # Backward compatibility for legacy schemas without privacy_mode.
+                    public_channels = conn.execute(
+                        "SELECT id FROM channels WHERE channel_type = 'public'"
+                    ).fetchall()
                 for (ch_id,) in public_channels:
                     conn.execute("""
                         INSERT OR IGNORE INTO channel_members (channel_id, user_id, role)
@@ -10929,6 +10946,12 @@ def create_ui_blueprint() -> Blueprint:
             db_manager, _, _, _, channel_manager, _, _, _, profile_manager, _, _ = _get_app_components_any(current_app)
             user_id = get_current_user()
             channel_id = request.args.get('channel_id')
+            query = str(request.args.get('q') or '').strip().lower()
+            try:
+                limit = int(request.args.get('limit', 500))
+            except (TypeError, ValueError):
+                limit = 500
+            limit = max(1, min(limit, 1000))
 
             users = []
             if channel_id:
@@ -10978,7 +11001,17 @@ def create_ui_blueprint() -> Blueprint:
                         'account_type': (info.get('account_type') or '').strip().lower() or None,
                     })
 
-            users = users[:200]
+            deduped_users = []
+            seen_user_ids: set[str] = set()
+            for user in users:
+                uid = str(user.get('user_id') or '').strip()
+                if not uid or uid in ('system', 'local_user') or uid in seen_user_ids:
+                    continue
+                seen_user_ids.add(uid)
+                user['user_id'] = uid
+                deduped_users.append(user)
+            users = deduped_users
+
             # Ensure account_type is available for mention-builder UIs
             # (agents vs humans) even when upstream profile/member payloads
             # do not include it.
@@ -11047,6 +11080,43 @@ def create_ui_blueprint() -> Blueprint:
                     user['presence_age_seconds'] = presence.get('age_seconds')
                     user['presence_age_text'] = presence.get('age_text')
 
+            def _norm(value: Any) -> str:
+                return str(value or '').strip().lower()
+
+            if query:
+                ranked = []
+                for user in users:
+                    display_name = _norm(user.get('display_name'))
+                    username_val = _norm(user.get('username'))
+                    handle_val = _norm(user.get('handle'))
+                    uid_val = _norm(user.get('user_id'))
+
+                    rank = None
+                    if handle_val.startswith(query) or username_val.startswith(query):
+                        rank = 0
+                    elif display_name.startswith(query) or uid_val.startswith(query):
+                        rank = 1
+                    elif query in handle_val or query in username_val:
+                        rank = 2
+                    elif query in display_name or query in uid_val:
+                        rank = 3
+
+                    if rank is None:
+                        continue
+
+                    ranked.append((rank, display_name or username_val or uid_val, user))
+
+                ranked.sort(key=lambda item: (item[0], item[1]))
+                users = [item[2] for item in ranked]
+            else:
+                users.sort(
+                    key=lambda user: (
+                        _norm(user.get('display_name') or user.get('username') or user.get('user_id')),
+                        _norm(user.get('user_id')),
+                    )
+                )
+
+            users = users[:limit]
             return jsonify({'success': True, 'users': users})
         except Exception as e:
             logger.error(f"Mention suggestions error: {e}")

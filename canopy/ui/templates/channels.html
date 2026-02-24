@@ -3136,6 +3136,8 @@ let noMoreOlderMessages = false;
 const OLDER_MESSAGES_LIMIT = 50;
 const AUTO_REFRESH_MS = 6000;
 const channelMentionCache = {};
+const channelMentionCacheFetchedAt = {};
+const CHANNEL_MENTION_CACHE_TTL_MS = 30000;
 let channelHashCache = null;
 let channelMentionContext = null;
 let channelMentionBuilderFilter = 'all';
@@ -3387,6 +3389,7 @@ function setChannelPrivacy(mode) {
         currentChannelType = (normalized === 'private' || normalized === 'confidential') ? 'private' : 'public';
         applyChannelPrivacyFromSelection(currentChannelId);
         delete channelMentionCache[currentChannelId];
+        delete channelMentionCacheFetchedAt[currentChannelId];
         fetchChannelMentionCandidates(currentChannelId);
         loadChannelMembers(currentChannelId);
         if (normalized === 'private' || normalized === 'confidential') {
@@ -4435,33 +4438,66 @@ function getChannelHashContext(textarea) {
     };
 }
 
-function fetchChannelMentionCandidates(channelId) {
+function fetchChannelMentionCandidates(channelId, options) {
     if (!channelId) return Promise.resolve([]);
-    if (channelMentionCache[channelId]) {
-        return Promise.resolve(channelMentionCache[channelId]);
+    const forceRefresh = !!(options && options.forceRefresh);
+    const cached = channelMentionCache[channelId];
+    const fetchedAt = Number(channelMentionCacheFetchedAt[channelId] || 0);
+    const isFresh = fetchedAt > 0 && (Date.now() - fetchedAt) < CHANNEL_MENTION_CACHE_TTL_MS;
+    if (!forceRefresh && Array.isArray(cached) && isFresh) {
+        return Promise.resolve(cached);
     }
     return apiCall(`/ajax/mention_suggestions?channel_id=${encodeURIComponent(channelId)}`)
         .then(data => {
             if (data && data.success && Array.isArray(data.users)) {
                 channelMentionCache[channelId] = data.users;
-                if (channelId === currentChannelId) {
-                    renderChannelMentionMacroButtons();
-                }
-                return data.users;
+            } else if (!Array.isArray(channelMentionCache[channelId])) {
+                channelMentionCache[channelId] = [];
             }
-            channelMentionCache[channelId] = [];
+            channelMentionCacheFetchedAt[channelId] = Date.now();
             if (channelId === currentChannelId) {
                 renderChannelMentionMacroButtons();
             }
-            return [];
+            return channelMentionCache[channelId];
         })
         .catch(() => {
-            channelMentionCache[channelId] = [];
+            if (!Array.isArray(channelMentionCache[channelId])) {
+                channelMentionCache[channelId] = [];
+            }
+            channelMentionCacheFetchedAt[channelId] = Date.now();
             if (channelId === currentChannelId) {
                 renderChannelMentionMacroButtons();
             }
-            return [];
+            return channelMentionCache[channelId];
         });
+}
+
+function getChannelMentionMatches(candidates, query, limit) {
+    const needle = String(query || '').trim().toLowerCase();
+    const max = Number(limit || 8);
+    const scored = (Array.isArray(candidates) ? candidates : []).map(item => {
+        if (!item) return null;
+        const label = String(item.display_name || '').toLowerCase();
+        const username = String(item.username || '').toLowerCase();
+        const handle = String(item.handle || '').toLowerCase();
+        const userId = String(item.user_id || '').toLowerCase();
+        if (!needle) {
+            return { item, score: 5, label: label || username || userId };
+        }
+        let score = -1;
+        if (handle.startsWith(needle) || username.startsWith(needle)) score = 0;
+        else if (label.startsWith(needle) || userId.startsWith(needle)) score = 1;
+        else if (handle.includes(needle) || username.includes(needle)) score = 2;
+        else if (label.includes(needle) || userId.includes(needle)) score = 3;
+        if (score < 0) return null;
+        return { item, score, label: label || username || userId };
+    }).filter(Boolean);
+
+    scored.sort((a, b) => {
+        if (a.score !== b.score) return a.score - b.score;
+        return a.label.localeCompare(b.label);
+    });
+    return scored.slice(0, max).map(entry => entry.item);
 }
 
 function normalizeMentionAccountType(accountType) {
@@ -5118,14 +5154,15 @@ function handleChannelMentionInput() {
         hideChannelHashSuggestions();
         fetchChannelMentionCandidates(currentChannelId).then(candidates => {
             const q = (mentionContext.query || '').toLowerCase();
-            const matches = candidates.filter(item => {
-                const name = (item.display_name || '').toLowerCase();
-                const username = (item.username || '').toLowerCase();
-                const handle = (item.handle || '').toLowerCase();
-                const userId = (item.user_id || '').toLowerCase();
-                if (!q) return true;
-                return name.includes(q) || username.includes(q) || handle.includes(q) || userId.includes(q);
-            }).slice(0, 6);
+            const matches = getChannelMentionMatches(candidates, q, 8);
+            if (q && !matches.length) {
+                fetchChannelMentionCandidates(currentChannelId, { forceRefresh: true }).then(refreshed => {
+                    const refreshedMatches = getChannelMentionMatches(refreshed, q, 8);
+                    channelMentionContext = mentionContext;
+                    renderChannelMentionSuggestions(refreshedMatches, mentionContext);
+                });
+                return;
+            }
             channelMentionContext = mentionContext;
             renderChannelMentionSuggestions(matches, mentionContext);
         });
@@ -6982,6 +7019,7 @@ function addSelectedMembersToChannel() {
         const next = selections.shift();
         if (!next) {
             delete channelMentionCache[currentChannelId];
+            delete channelMentionCacheFetchedAt[currentChannelId];
             fetchChannelMentionCandidates(currentChannelId);
             loadChannelMembers(currentChannelId);
             return;
@@ -7004,6 +7042,7 @@ function removeMemberFromChannel(userId) {
     apiCall(`/ajax/channel_members/${currentChannelId}/${userId}`, { method: 'DELETE' })
         .then(() => {
             delete channelMentionCache[currentChannelId];
+            delete channelMentionCacheFetchedAt[currentChannelId];
             fetchChannelMentionCandidates(currentChannelId);
             loadChannelMembers(currentChannelId);
         })

@@ -431,6 +431,9 @@
 
     let taskUsers = {};
     let mentionSuggestions = [];
+    let mentionSuggestionsLoading = false;
+    let mentionSuggestionsFetchedAt = 0;
+    const TASK_MENTION_CACHE_TTL_MS = 30000;
 
     function escapeHtml(text) {
         return (text || '')
@@ -643,15 +646,29 @@
             });
     }
 
-    function loadMentionSuggestions() {
+    function loadMentionSuggestions(options) {
+        const forceRefresh = !!(options && options.forceRefresh);
+        const isFresh = mentionSuggestionsFetchedAt > 0
+            && (Date.now() - mentionSuggestionsFetchedAt) < TASK_MENTION_CACHE_TTL_MS;
+        if (!forceRefresh && Array.isArray(mentionSuggestions) && mentionSuggestions.length && isFresh) {
+            return Promise.resolve(mentionSuggestions);
+        }
+        if (mentionSuggestionsLoading) return Promise.resolve(mentionSuggestions);
+        mentionSuggestionsLoading = true;
         return apiCall('/ajax/mention_suggestions')
             .then(data => {
                 if (data && data.users) {
                     mentionSuggestions = data.users;
                 }
+                mentionSuggestionsFetchedAt = Date.now();
+                mentionSuggestionsLoading = false;
+                return mentionSuggestions;
             })
             .catch(err => {
                 console.warn('Failed to load mention suggestions', err);
+                mentionSuggestionsFetchedAt = Date.now();
+                mentionSuggestionsLoading = false;
+                return mentionSuggestions;
             });
     }
 
@@ -677,18 +694,7 @@
             suggestionsEl.innerHTML = '';
         }
 
-        input.addEventListener('input', () => {
-            input.dataset.userId = '';
-            const query = input.value.trim();
-            if (!query || query.length < 2) {
-                hideSuggestions();
-                return;
-            }
-            const matches = filterAssigneeSuggestions(query);
-            if (!matches.length) {
-                hideSuggestions();
-                return;
-            }
+        function renderSuggestions(matches) {
             suggestionsEl.innerHTML = matches.map(user => {
                 const safeDisplay = escapeHtml(user.display_name || user.username || user.user_id || '?');
                 const safeUid = escapeHtml(user.user_id || '');
@@ -709,6 +715,28 @@
                 `;
             }).join('');
             suggestionsEl.style.display = 'block';
+        }
+
+        input.addEventListener('input', () => {
+            input.dataset.userId = '';
+            const query = input.value.trim();
+            if (!query || query.length < 2) {
+                hideSuggestions();
+                return;
+            }
+            const matches = filterAssigneeSuggestions(query);
+            if (!matches.length) {
+                loadMentionSuggestions({ forceRefresh: true }).then(() => {
+                    const refreshedMatches = filterAssigneeSuggestions(query);
+                    if (!refreshedMatches.length) {
+                        hideSuggestions();
+                        return;
+                    }
+                    renderSuggestions(refreshedMatches);
+                });
+                return;
+            }
+            renderSuggestions(matches);
         });
 
         suggestionsEl.addEventListener('click', (event) => {
