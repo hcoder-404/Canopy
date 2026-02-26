@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ---
 
+## [0.4.9] - 2026-02-26
+
+### Fixed
+- **API key persistence across restarts** — Agent keys no longer appear invalid after Canopy restarts when the launch working-directory differs from the source tree. `get_device_data_dir` now resolves the data root in priority order: `CANOPY_DATA_ROOT` env override → persisted root in `~/.canopy/device_identity.json` → first-run probe for an existing `canopy.db` → module-derived project root. Selected root is written back to `device_identity.json` so every subsequent restart is deterministic and CWD-independent.
+- **Config path resolution made CWD-independent** — `_apply_device_paths` now seeds from `Path(__file__).resolve().parents[2] / 'data'` (module location) instead of relative `./data`, closing the last startup-CWD dependency. Legacy migration probes both the module-derived root and `./data` as candidates before copying.
+- **Startup log clarity** — Database startup now logs whether the DB file already exists and its size in bytes, making it immediately clear that no data loss occurred. Schema init log updated from the misleading "tables created" to "schema ensured (IF NOT EXISTS)".
+
+---
+
 ## [0.4.8] - 2026-02-26
 
 ### Added

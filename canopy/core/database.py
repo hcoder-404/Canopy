@@ -34,8 +34,21 @@ class DatabaseManager:
         logger.info("Initializing DatabaseManager")
         self.config = config
         self.db_path = Path(config.storage.database_path)
-        
+
         logger.info(f"Database path: {self.db_path.absolute()}")
+        db_existed = self.db_path.exists()
+        if db_existed:
+            try:
+                size_bytes = self.db_path.stat().st_size
+            except Exception:
+                size_bytes = -1
+            logger.info(
+                "Using existing database file (exists=%s, size_bytes=%s)",
+                True,
+                size_bytes,
+            )
+        else:
+            logger.info("No existing database file detected; creating new database on first write")
         
         # Create database directory
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -69,7 +82,7 @@ class DatabaseManager:
         Uses a longer busy_timeout (30s) and retries on lock so startup can
         wait out brief lock storms (e.g. Dropbox, stale WAL/shm).
         """
-        logger.info("Creating database tables...")
+        logger.info("Ensuring database schema (IF NOT EXISTS)...")
         last_error = None
         for attempt in range(3):
             try:
@@ -320,7 +333,7 @@ class DatabaseManager:
                     """, (datetime.now(timezone.utc).isoformat(),))
 
                     conn.commit()
-                    logger.info("Database tables created and initialized successfully")
+                    logger.info("Database schema ensured successfully (CREATE TABLE IF NOT EXISTS)")
 
                     # Run migrations for existing databases
                     # Ensure migration tracking table exists

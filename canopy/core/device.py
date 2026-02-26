@@ -32,6 +32,35 @@ _DEVICE_DIR = Path.home() / '.canopy'
 _DEVICE_FILE = _DEVICE_DIR / 'device_identity.json'
 
 
+def _resolve_path(path: Path) -> Path:
+    """Best-effort absolute path expansion without throwing on odd filesystems."""
+    try:
+        return path.expanduser().resolve()
+    except Exception:
+        return path.expanduser()
+
+
+def _default_project_data_root() -> Path:
+    """Stable project data root derived from source location, not process CWD."""
+    return Path(__file__).resolve().parents[2] / 'data'
+
+
+def _persist_device_data_root(data_root: Path) -> None:
+    """Persist selected data root into device identity for cross-restart stability."""
+    try:
+        identity = get_device_identity()
+        root_value = str(_resolve_path(data_root))
+        if str(identity.get('data_root') or '') == root_value:
+            return
+        identity['data_root'] = root_value
+        _DEVICE_DIR.mkdir(parents=True, exist_ok=True)
+        _DEVICE_FILE.write_text(json.dumps(identity, indent=2))
+        os.chmod(_DEVICE_FILE, 0o600)
+        logger.info(f"Persisted device data root: {root_value}")
+    except Exception as e:
+        logger.warning(f"Could not persist data_root in {_DEVICE_FILE}: {e}")
+
+
 def get_device_identity() -> Dict[str, Any]:
     """
     Return the stable device identity for this machine.
@@ -98,12 +127,63 @@ def get_device_data_dir(project_data_root: Path = Path('./data')) -> Path:
     device_id = get_device_id()
 
     env_root = os.environ.get('CANOPY_DATA_ROOT', '').strip()
-    if env_root:
-        device_dir = Path(env_root) / 'devices' / device_id
-    else:
-        device_dir = project_data_root / 'devices' / device_id
+    data_root: Optional[Path] = None
 
-    device_dir.mkdir(parents=True, exist_ok=True)
+    # 1) Explicit override always wins.
+    if env_root:
+        data_root = _resolve_path(Path(env_root))
+    else:
+        # 2) Reuse previously chosen root from device identity when present.
+        identity = get_device_identity()
+        persisted_root = str(identity.get('data_root') or '').strip()
+        if persisted_root:
+            data_root = _resolve_path(Path(persisted_root))
+        else:
+            # 3) First-run selection (and persist it):
+            #    prefer any root that already contains this device DB.
+            cwd_root = (
+                _resolve_path(project_data_root)
+                if project_data_root.is_absolute()
+                else _resolve_path(Path.cwd() / project_data_root)
+            )
+            module_root = _resolve_path(_default_project_data_root())
+            home_root = _resolve_path(_DEVICE_DIR / 'data')
+
+            candidates = []
+            for root in (module_root, cwd_root, home_root):
+                if root not in candidates:
+                    candidates.append(root)
+
+            existing_roots = [
+                root for root in candidates
+                if (root / 'devices' / device_id / 'canopy.db').exists()
+            ]
+            if existing_roots:
+                data_root = existing_roots[0]
+            else:
+                # Default new installs to the module-derived project root when writable;
+                # otherwise fall back to ~/.canopy/data.
+                writable_base = module_root if os.access(module_root.parent, os.W_OK) else home_root
+                data_root = writable_base
+
+            _persist_device_data_root(data_root)
+
+    device_dir = data_root / 'devices' / device_id
+    try:
+        device_dir.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        # Last-resort fallback to ~/.canopy/data when selected root is unavailable.
+        if env_root:
+            raise
+        fallback_root = _resolve_path(_DEVICE_DIR / 'data')
+        logger.warning(
+            f"Could not create device data dir under {data_root} ({e}); "
+            f"falling back to {fallback_root}"
+        )
+        _persist_device_data_root(fallback_root)
+        device_dir = fallback_root / 'devices' / device_id
+        device_dir.mkdir(parents=True, exist_ok=True)
+
     return device_dir
 
 

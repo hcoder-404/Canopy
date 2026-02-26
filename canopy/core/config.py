@@ -111,14 +111,20 @@ def _apply_device_paths(config: 'Config') -> None:
     """
     from .device import get_device_data_dir, get_device_id, get_device_label
 
-    device_dir = get_device_data_dir(Path('./data'))
+    # Resolve from module location so path selection is independent of process CWD.
+    project_data_root = Path(__file__).resolve().parents[2] / 'data'
+    device_dir = get_device_data_dir(project_data_root)
     device_dir.mkdir(parents=True, exist_ok=True)
 
     db_path = device_dir / 'canopy.db'
 
-    # Auto-migrate legacy data (./data/canopy.db → device dir) on first run
-    legacy_db = Path('./data/canopy.db')
-    if legacy_db.exists() and not db_path.exists():
+    # Auto-migrate legacy data (<data_root>/canopy.db → device dir) on first run.
+    legacy_candidates = [
+        project_data_root / 'canopy.db',
+        Path('./data/canopy.db'),
+    ]
+    legacy_db = next((p for p in legacy_candidates if p.exists()), None)
+    if legacy_db and not db_path.exists():
         import shutil
         logger.info(
             f"Migrating legacy database to device directory: "
@@ -126,13 +132,14 @@ def _apply_device_paths(config: 'Config') -> None:
         )
         shutil.copy2(legacy_db, db_path)
         # Also migrate secret_key and peer_identity if present
+        legacy_root = legacy_db.parent
         for fname in ('secret_key.json', 'peer_identity.json'):
-            src = Path('./data') / fname
+            src = legacy_root / fname
             dst = device_dir / fname
             if src.exists() and not dst.exists():
                 shutil.copy2(src, dst)
         # Migrate files directory
-        legacy_files = Path('./data/files')
+        legacy_files = legacy_root / 'files'
         device_files = device_dir / 'files'
         if legacy_files.is_dir() and not device_files.exists():
             shutil.copytree(legacy_files, device_files)
