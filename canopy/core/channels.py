@@ -2225,17 +2225,14 @@ class ChannelManager:
                 cursor = conn.execute(query, params)
                 rows = cursor.fetchall()
                 
-                # Convert to Message objects (skip corrupt rows gracefully)
-                messages = []
-                for row in rows:
+                def _row_to_message(row: Any, row_type: str = "message") -> Optional[Message]:
+                    """Best-effort row parser used for primary query rows and recursively fetched parents."""
                     try:
-                        # Parse message_type safely
                         try:
                             msg_type = MessageType(row['message_type'])
                         except (ValueError, KeyError):
                             msg_type = MessageType.TEXT
 
-                        # Parse created_at safely
                         created_at_raw = row['created_at'] or ''
                         try:
                             created_at = datetime.fromisoformat(created_at_raw.replace('Z', '+00:00'))
@@ -2245,7 +2242,6 @@ class ChannelManager:
                             except Exception:
                                 created_at = datetime.now()
 
-                        # Parse edited_at safely
                         edited_at = None
                         if row['edited_at']:
                             try:
@@ -2255,7 +2251,7 @@ class ChannelManager:
 
                         expires_at = self._parse_datetime(row['expires_at']) if 'expires_at' in row.keys() else None
 
-                        message = Message(
+                        return Message(
                             id=row['id'],
                             channel_id=row['channel_id'],
                             user_id=row['user_id'],
@@ -2271,22 +2267,34 @@ class ChannelManager:
                             expires_at=expires_at,
                             origin_peer=row['origin_peer'] if 'origin_peer' in row.keys() else None,
                         )
-                        messages.append(message)
                     except Exception as row_err:
-                        logger.warning(f"Skipping corrupt message row {row['id']}: {row_err}")
-                        continue
+                        row_id = '?'
+                        try:
+                            row_id = row['id'] if 'id' in row.keys() else '?'
+                        except Exception:
+                            row_id = '?'
+                        logger.warning(f"Skipping corrupt {row_type} row {row_id}: {row_err}")
+                        return None
+
+                # Convert to Message objects (skip corrupt rows gracefully)
+                messages: List[Message] = []
+                for row in rows:
+                    message = _row_to_message(row, "message")
+                    if message:
+                        messages.append(message)
                 
                 # Reverse to get chronological order
                 messages.reverse()
 
-                # Include any missing parent messages so replies render under the correct post
-                # (otherwise replies whose parent is older than the fetch window appear as "orphans")
+                # Include any missing parent/ancestor messages so replies render under the correct post.
+                # This walks parent chains recursively; one-level hydration can orphan deep reply chains.
                 msg_ids = {m.id for m in messages}
-                missing_parent_ids = set()
-                for m in messages:
-                    if m.parent_message_id and m.parent_message_id not in msg_ids:
-                        missing_parent_ids.add(m.parent_message_id)
-                if missing_parent_ids:
+                missing_parent_ids = {
+                    m.parent_message_id
+                    for m in messages
+                    if m.parent_message_id and m.parent_message_id not in msg_ids
+                }
+                while missing_parent_ids:
                     placeholders = ",".join("?" * len(missing_parent_ids))
                     parent_rows = conn.execute(
                         f"""
@@ -2298,47 +2306,20 @@ class ChannelManager:
                         """,
                         [channel_id] + list(missing_parent_ids),
                     ).fetchall()
+                    if not parent_rows:
+                        break
+
+                    next_missing_parent_ids = set()
                     for row in parent_rows:
-                        try:
-                            try:
-                                msg_type = MessageType(row['message_type'])
-                            except (ValueError, KeyError):
-                                msg_type = MessageType.TEXT
-                            created_at_raw = row['created_at'] or ''
-                            try:
-                                created_at = datetime.fromisoformat(created_at_raw.replace('Z', '+00:00'))
-                            except (ValueError, AttributeError):
-                                try:
-                                    created_at = datetime.strptime(created_at_raw, '%Y-%m-%d %H:%M:%S')
-                                except Exception:
-                                    created_at = datetime.now()
-                            edited_at = None
-                            if row['edited_at']:
-                                try:
-                                    edited_at = datetime.fromisoformat(row['edited_at'].replace('Z', '+00:00'))
-                                except (ValueError, AttributeError):
-                                    pass
-                            expires_at = self._parse_datetime(row['expires_at']) if 'expires_at' in row.keys() else None
-                            message = Message(
-                                id=row['id'],
-                                channel_id=row['channel_id'],
-                                user_id=row['user_id'],
-                                content=row['content'] or '',
-                                message_type=msg_type,
-                                created_at=created_at,
-                                thread_id=row['thread_id'],
-                                parent_message_id=row['parent_message_id'],
-                                reactions=json.loads(row['reactions']) if row['reactions'] else None,
-                                attachments=json.loads(row['attachments']) if row['attachments'] else None,
-                                edited_at=edited_at,
-                                expires_at=expires_at,
-                                origin_peer=row['origin_peer'] if 'origin_peer' in row.keys() else None,
-                            )
-                            messages.append(message)
-                            msg_ids.add(message.id)
-                        except Exception as row_err:
-                            logger.warning(f"Skipping corrupt parent row {row.get('id', '?')}: {row_err}")
-                    # Keep the original page order stable for pagination cursors.
+                        message = _row_to_message(row, "parent")
+                        if not message or message.id in msg_ids:
+                            continue
+                        messages.append(message)
+                        msg_ids.add(message.id)
+                        if message.parent_message_id and message.parent_message_id not in msg_ids:
+                            next_missing_parent_ids.add(message.parent_message_id)
+                    # Keep original page ordering stable for pagination cursors and only append ancestors.
+                    missing_parent_ids = next_missing_parent_ids
 
                 logger.debug(f"Retrieved {len(messages)} messages from channel {channel_id}")
                 return messages

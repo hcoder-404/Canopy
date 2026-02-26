@@ -5177,8 +5177,17 @@ function isNearBottom(container, threshold = 120) {
 
 function getMessagesSignature(messages) {
     if (!messages || messages.length === 0) return 'empty';
+    const first = messages[0];
     const last = messages[messages.length - 1];
-    return `${messages.length}:${last.id}:${last.created_at}`;
+    let hash = 2166136261; // FNV-1a 32-bit basis
+    messages.forEach(m => {
+        const token = `${m.id || ''}|${m.parent_message_id || ''}|${m.created_at || ''}|${m.edited_at || ''}`;
+        for (let i = 0; i < token.length; i += 1) {
+            hash ^= token.charCodeAt(i);
+            hash = Math.imul(hash, 16777619);
+        }
+    });
+    return `${messages.length}:${first.id}:${last.id}:${(hash >>> 0).toString(16)}`;
 }
 
 function isChannelMediaPlaying() {
@@ -5224,9 +5233,15 @@ function appendNewMessages(allMessages) {
     function findThreadRoot(m) {
         let cur = m;
         const visited = new Set();
-        while (cur && cur.parent_message_id && allById[cur.parent_message_id] && !visited.has(cur.parent_message_id)) {
+        while (
+            cur &&
+            cur.parent_message_id &&
+            !visited.has(cur.parent_message_id)
+        ) {
+            const parent = allById[cur.parent_message_id] || channelMessageCache[cur.parent_message_id];
+            if (!parent) break;
             visited.add(cur.id);
-            cur = allById[cur.parent_message_id];
+            cur = parent;
         }
         return cur;
     }
@@ -5278,7 +5293,9 @@ function appendNewMessages(allMessages) {
             }
         }
 
-        // Append new replies after their thread root (or at end if root not found)
+        let needsFullReload = false;
+
+        // Append new replies after their thread root
         Object.keys(newReplies).forEach(rootId => {
             const replies = newReplies[rootId];
             replies.sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
@@ -5291,24 +5308,35 @@ function appendNewMessages(allMessages) {
             const rootEl = messagesContainer.querySelector(
                 `.message-item[data-message-id="${rootId}"]`
             );
+            if (!rootEl) {
+                // If the parent/root is not in the DOM, fall back to a full render
+                // to avoid orphaned replies being appended as loose bottom items.
+                needsFullReload = true;
+                return;
+            }
             let insertAfter = rootEl;
-            if (rootEl) {
-                // Walk forward to find the last existing reply in this thread
-                let sibling = rootEl.nextElementSibling;
-                while (sibling && sibling.classList.contains('thread-reply')) {
-                    insertAfter = sibling;
-                    sibling = sibling.nextElementSibling;
-                }
+            // Walk forward to find the last existing reply in this thread
+            let sibling = rootEl.nextElementSibling;
+            while (sibling && sibling.classList.contains('thread-reply')) {
+                insertAfter = sibling;
+                sibling = sibling.nextElementSibling;
             }
 
             while (fragment.firstChild) {
+                const node = fragment.firstChild;
                 if (insertAfter && insertAfter.nextSibling) {
-                    messagesContainer.insertBefore(fragment.firstChild, insertAfter.nextSibling);
+                    messagesContainer.insertBefore(node, insertAfter.nextSibling);
                 } else {
-                    messagesContainer.appendChild(fragment.firstChild);
+                    messagesContainer.appendChild(node);
                 }
+                insertAfter = node;
             }
         });
+
+        if (needsFullReload) {
+            displayMessages(allMessages, { forceScroll: wasNearBottom });
+            return;
+        }
 
         // Post-processing on the new elements only
         formatTimestamps();
@@ -5525,7 +5553,7 @@ function pollChannelMessages() {
     }
     const requestedChannelId = String(currentChannelId);
     channelRefreshInFlight = true;
-    apiCall(`/ajax/channel_messages/${requestedChannelId}`)
+    apiCall(`/ajax/channel_messages/${requestedChannelId}?_poll=${Date.now()}`)
         .then(data => {
             if (String(currentChannelId) !== requestedChannelId) {
                 return;
@@ -5539,15 +5567,26 @@ function pollChannelMessages() {
             }
             if (newSig !== prevSig) {
                 const container = document.getElementById('messages-container');
+                const nearBottom = isNearBottom(container);
                 if (isChannelMediaPlaying()) {
                     // Incrementally append new messages without destroying
                     // existing DOM elements (preserves audio/video playback)
                     appendNewMessages(data.messages);
-                } else if (isNearBottom(container)) {
-                    displayMessages(data.messages, { forceScroll: true });
                 } else {
-                    pendingChannelMessages = data.messages;
-                    showNewMessagesBanner();
+                    const appended = appendNewMessages(data.messages);
+                    if (!appended) {
+                        if (nearBottom) {
+                            displayMessages(data.messages, { forceScroll: true });
+                            clearNewMessagesBanner();
+                        } else {
+                            pendingChannelMessages = data.messages;
+                            showNewMessagesBanner();
+                        }
+                    } else if (nearBottom) {
+                        clearNewMessagesBanner();
+                    } else {
+                        showNewMessagesBanner();
+                    }
                 }
             }
         })
@@ -7671,6 +7710,14 @@ document.addEventListener('DOMContentLoaded', function() {
             setupEmojiPicker();
 	        setInterval(updateChannelExpiryBadges, 60000);
 	        setInterval(pollChannelMessages, AUTO_REFRESH_MS);
+            document.addEventListener('visibilitychange', () => {
+                if (!document.hidden) {
+                    setTimeout(() => pollChannelMessages(), 100);
+                }
+            });
+            window.addEventListener('focus', () => {
+                setTimeout(() => pollChannelMessages(), 100);
+            });
 
             // Auto-load older messages when scrolling near the top
             const scrollCont = document.getElementById('messages-container');

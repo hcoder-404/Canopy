@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ---
 
+## [0.4.7] - 2026-02-26
+
+### Fixed
+- **Channel thread parent hydration** — `get_channel_messages` now recursively fetches the full ancestor chain for deep reply threads; previously only one missing parent level was hydrated, leaving deeper chains broken. Both primary rows and hydrated ancestors share a single `_row_to_message` helper.
+- **Orphaned reply placement** — When an incremental poll receives a reply whose thread root is not in the DOM, the frontend now falls back to a full render instead of appending the reply as a loose bottom post.
+- **Weak change detection on Windows** — Channel message poll signature upgraded to an FNV-1a hash across message IDs, parent IDs, and timestamps so subtle feed changes (edits, thread inserts) are no longer missed.
+- **Windows tab-focus refresh lag** — Immediate poll triggered on `visibilitychange` (tab visible) and `window.focus`; cache-busting `?_poll=<timestamp>` query param added to prevent stale responses.
+
+---
+
 ## [0.4.6] - 2026-02-25
 
 ### Added
