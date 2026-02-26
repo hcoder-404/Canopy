@@ -54,6 +54,79 @@ class FileInfo:
 
 class FileManager:
     """Manages file uploads, storage, and retrieval."""
+    _GENERIC_CONTENT_TYPES = {
+        '',
+        'application/octet-stream',
+        'binary/octet-stream',
+        'application/x-binary',
+        'application/unknown',
+    }
+    _GENERIC_FILENAMES = {
+        '',
+        'file',
+        'upload',
+        'attachment',
+        'unnamed_file',
+    }
+    _EXT_TO_MIME = {
+        '.pdf': 'application/pdf',
+        '.md': 'text/markdown',
+        '.markdown': 'text/markdown',
+        '.txt': 'text/plain',
+        '.log': 'text/plain',
+        '.json': 'application/json',
+        '.csv': 'text/csv',
+        '.tex': 'text/x-tex',
+        '.latex': 'application/x-latex',
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.png': 'image/png',
+        '.gif': 'image/gif',
+        '.webp': 'image/webp',
+        '.bmp': 'image/bmp',
+        '.svg': 'image/svg+xml',
+        '.mp3': 'audio/mpeg',
+        '.wav': 'audio/wav',
+        '.ogg': 'audio/ogg',
+        '.oga': 'audio/ogg',
+        '.m4a': 'audio/mp4',
+        '.mp4': 'video/mp4',
+        '.m4v': 'video/mp4',
+        '.webm': 'video/webm',
+        '.mov': 'video/quicktime',
+        '.xml': 'application/xml',
+        '.html': 'text/html',
+        '.htm': 'text/html',
+        '.zip': 'application/zip',
+        '.gz': 'application/gzip',
+        '.gzip': 'application/gzip',
+    }
+    _MIME_TO_EXT = {
+        'application/pdf': '.pdf',
+        'text/markdown': '.md',
+        'text/plain': '.txt',
+        'application/json': '.json',
+        'text/csv': '.csv',
+        'text/x-tex': '.tex',
+        'application/x-latex': '.tex',
+        'image/jpeg': '.jpg',
+        'image/png': '.png',
+        'image/gif': '.gif',
+        'image/webp': '.webp',
+        'image/bmp': '.bmp',
+        'image/svg+xml': '.svg',
+        'audio/mpeg': '.mp3',
+        'audio/wav': '.wav',
+        'audio/ogg': '.ogg',
+        'audio/mp4': '.m4a',
+        'video/mp4': '.mp4',
+        'video/webm': '.webm',
+        'video/quicktime': '.mov',
+        'application/xml': '.xml',
+        'text/html': '.html',
+        'application/zip': '.zip',
+        'application/gzip': '.gz',
+    }
     
     def __init__(self, db: DatabaseManager, storage_path: str = "./data/files"):
         """Initialize the file manager.
@@ -65,6 +138,7 @@ class FileManager:
         self.db = db
         self.storage_path = Path(storage_path)
         self.max_file_size = 100 * 1024 * 1024  # 100MB default
+        self._project_root = Path(__file__).resolve().parents[2]
         
         logger.info(f"Initializing FileManager with storage path: {self.storage_path}")
         
@@ -80,6 +154,90 @@ class FileManager:
         
         self._ensure_tables()
         logger.info("FileManager initialized successfully")
+
+    def _candidate_storage_roots(self) -> List[Path]:
+        """Return plausible storage roots for backward-compatible file lookup."""
+        roots: List[Path] = []
+
+        def _add(path: Path) -> None:
+            p = path.expanduser()
+            if p not in roots:
+                roots.append(p)
+
+        _add(self.storage_path)
+
+        # Legacy shared locations (before strict per-device file roots).
+        _add(self._project_root / 'data' / 'files')
+        _add(Path.cwd() / 'data' / 'files')
+
+        # If storage path is device-scoped (.../devices/<id>/files), add common alternates.
+        parts = list(self.storage_path.parts)
+        if 'devices' in parts:
+            idx = parts.index('devices')
+            if idx + 2 < len(parts):
+                device_id = parts[idx + 1]
+                _add(self._project_root / 'data' / 'devices' / device_id / 'files')
+                _add(Path.cwd() / 'data' / 'devices' / device_id / 'files')
+                _add(Path.home() / '.canopy' / 'data' / 'devices' / device_id / 'files')
+
+        return roots
+
+    def _resolve_file_disk_path(self, stored_path: str) -> Path:
+        """Resolve a DB file_path to an on-disk file path with compatibility fallbacks."""
+        normalized = str(stored_path or '').replace('\\', '/').strip()
+        if not normalized:
+            return self.storage_path / '__missing__'
+
+        candidates: List[Path] = []
+
+        def _add(path: Path) -> None:
+            if path not in candidates:
+                candidates.append(path)
+
+        storage_roots = self._candidate_storage_roots()
+        storage_prefix = str(self.storage_path).replace('\\', '/') + '/'
+        path_obj = Path(normalized)
+
+        if path_obj.is_absolute():
+            _add(path_obj)
+
+        # Relative paths that begin with data/... should be rooted at project or current CWD.
+        if normalized.startswith('data/'):
+            _add(self._project_root / normalized)
+            _add(Path.cwd() / normalized)
+
+        if normalized.startswith('data/files/'):
+            rel = normalized.replace('data/files/', '', 1)
+            for root in storage_roots:
+                _add(root / rel)
+        elif normalized.startswith('data/devices/'):
+            # Legacy per-device relative path.
+            # Example: data/devices/<id>/files/images/Fabc.jpg -> images/Fabc.jpg
+            tail = normalized.split('/files/', 1)[1] if '/files/' in normalized else ''
+            if tail:
+                for root in storage_roots:
+                    _add(root / tail)
+
+        if normalized.startswith(storage_prefix):
+            _add(Path(normalized))
+        elif not path_obj.is_absolute():
+            # Generic relative fallback.
+            for root in storage_roots:
+                _add(root / normalized)
+
+            # Basename fallback by category for mismatched historical roots.
+            basename = Path(normalized).name
+            if basename:
+                for root in storage_roots:
+                    for category in ('images', 'videos', 'documents', 'audio', 'other'):
+                        _add(root / category / basename)
+
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+
+        # Return best-effort primary candidate for diagnostic logging.
+        return candidates[0] if candidates else (self.storage_path / normalized)
     
     def _ensure_tables(self) -> None:
         """Ensure file-related database tables exist."""
@@ -154,6 +312,125 @@ class FileManager:
 
         return filename
 
+    def _is_generic_filename(self, filename: str) -> bool:
+        stem = Path(filename or '').stem.lower().strip()
+        return stem in self._GENERIC_FILENAMES or not Path(filename or '').suffix
+
+    def _is_generic_content_type(self, content_type: str) -> bool:
+        return str(content_type or '').strip().lower() in self._GENERIC_CONTENT_TYPES
+
+    def _looks_like_text(self, sample: bytes) -> bool:
+        if not sample or b'\x00' in sample:
+            return False
+        try:
+            text = sample.decode('utf-8')
+        except UnicodeDecodeError:
+            return False
+        if not text:
+            return False
+        printable = sum(1 for ch in text if ch.isprintable() or ch in '\r\n\t')
+        return (printable / max(len(text), 1)) >= 0.9
+
+    def _detect_markdown_like(self, text: str) -> bool:
+        lines = [ln.strip() for ln in text.splitlines()[:40] if ln.strip()]
+        if not lines:
+            return False
+        md_markers = ('#', '##', '###', '- ', '* ', '> ', '```', '|', '1. ', '2. ')
+        if any(any(line.startswith(marker) for marker in md_markers) for line in lines):
+            return True
+        return ('[](' in text or '](' in text or '**' in text or '__' in text)
+
+    def _detect_content_type(self, file_data: bytes, filename: str, claimed_content_type: str) -> Optional[str]:
+        ext = Path(filename or '').suffix.lower()
+        if ext and ext in self._EXT_TO_MIME:
+            return self._EXT_TO_MIME[ext]
+
+        data = file_data or b''
+        if data.startswith(b'%PDF-'):
+            return 'application/pdf'
+        if data.startswith(b'\x89PNG\r\n\x1a\n'):
+            return 'image/png'
+        if data.startswith(b'\xff\xd8\xff'):
+            return 'image/jpeg'
+        if data.startswith((b'GIF87a', b'GIF89a')):
+            return 'image/gif'
+        if data.startswith(b'RIFF') and len(data) > 12 and data[8:12] == b'WEBP':
+            return 'image/webp'
+        if data.startswith(b'ID3') or data.startswith((b'\xff\xfb', b'\xff\xfa', b'\xff\xf3', b'\xff\xf2')):
+            return 'audio/mpeg'
+        if data.startswith(b'RIFF') and len(data) > 12 and data[8:12] == b'WAVE':
+            return 'audio/wav'
+        if data.startswith(b'OggS'):
+            return 'audio/ogg'
+        if data.startswith((b'\x00\x00\x00\x18ftypmp4', b'\x00\x00\x00\x1Cftypisom', b'\x00\x00\x00\x1Cftypmp42')):
+            if str(claimed_content_type or '').startswith('audio/'):
+                return 'audio/mp4'
+            return 'video/mp4'
+        if data.startswith(b'\x1A\x45\xDF\xA3'):
+            if str(claimed_content_type or '').startswith('audio/'):
+                return 'audio/webm'
+            return 'video/webm'
+        if data.startswith((b'<!DOCTYPE', b'<html', b'<HTML')):
+            return 'text/html'
+        if data.startswith(b'<?xml'):
+            return 'application/xml'
+        if data.startswith((b'PK\x03\x04', b'PK\x05\x06', b'PK\x07\x08')):
+            return 'application/zip'
+        if data.startswith(b'\x1f\x8b'):
+            return 'application/gzip'
+
+        sample = data[:8192]
+        if self._looks_like_text(sample):
+            try:
+                text = sample.decode('utf-8', errors='ignore')
+            except Exception:
+                text = ''
+            stripped = text.lstrip()
+            if stripped.startswith(('{', '[')):
+                return 'application/json'
+            if '\\documentclass' in text or '\\begin{' in text:
+                return 'text/x-tex'
+            if self._detect_markdown_like(text):
+                return 'text/markdown'
+            if ',' in text and '\n' in text:
+                return 'text/csv'
+            return 'text/plain'
+
+        return None
+
+    def _normalize_incoming_metadata(self, file_data: bytes, original_name: str,
+                                     content_type: str) -> tuple[str, str]:
+        name = self._sanitize_filename(original_name or 'file')
+        ctype = str(content_type or '').strip().lower()
+        if not ctype:
+            ctype = 'application/octet-stream'
+
+        generic_name = self._is_generic_filename(name)
+        generic_type = self._is_generic_content_type(ctype)
+        detected = self._detect_content_type(file_data, name, ctype)
+
+        if generic_type and detected:
+            ctype = detected
+
+        if generic_name:
+            ext = Path(name).suffix.lower()
+            if not ext:
+                ext = self._MIME_TO_EXT.get(ctype, '')
+            base = Path(name).stem.lower()
+            if not base or base in self._GENERIC_FILENAMES:
+                base = 'file'
+            if ext:
+                name = f"{base}{ext}"
+            else:
+                name = base
+
+        return name, ctype
+
+    def normalize_upload_metadata(self, file_data: bytes, original_name: str,
+                                  content_type: str) -> tuple[str, str]:
+        """Public helper for routes to normalize generic upload metadata."""
+        return self._normalize_incoming_metadata(file_data, original_name, content_type)
+
     def _get_file_category(self, content_type: str) -> str:
         """Determine file category based on content type."""
         if content_type.startswith('image/'):
@@ -175,6 +452,49 @@ class FileManager:
     def _calculate_checksum(self, file_data: bytes) -> str:
         """Calculate SHA-256 checksum of file data."""
         return hashlib.sha256(file_data).hexdigest()
+
+    def _backfill_generic_file_metadata(self, file_info: FileInfo) -> FileInfo:
+        """Best-effort metadata backfill for legacy generic uploads."""
+        needs_name = self._is_generic_filename(file_info.original_name)
+        needs_type = self._is_generic_content_type(file_info.content_type)
+        if not needs_name and not needs_type:
+            return file_info
+
+        disk_path = self._resolve_file_disk_path(file_info.file_path)
+        if not disk_path.exists():
+            return file_info
+
+        try:
+            with open(disk_path, 'rb') as f:
+                sample = f.read(8192)
+        except Exception:
+            return file_info
+
+        new_name, new_type = self._normalize_incoming_metadata(
+            file_data=sample,
+            original_name=file_info.original_name,
+            content_type=file_info.content_type,
+        )
+        if new_name == file_info.original_name and new_type == file_info.content_type:
+            return file_info
+
+        try:
+            with self.db.get_connection() as conn:
+                conn.execute(
+                    "UPDATE files SET original_name = ?, content_type = ? WHERE id = ?",
+                    (new_name, new_type, file_info.id),
+                )
+                conn.commit()
+            file_info.original_name = new_name
+            file_info.content_type = new_type
+            logger.info(
+                f"Backfilled file metadata for {file_info.id}: "
+                f"name={new_name}, type={new_type}"
+            )
+        except Exception as e:
+            logger.debug(f"File metadata backfill skipped for {file_info.id}: {e}")
+
+        return file_info
 
     # ------------------------------------------------------------------
     # Thumbnail helpers
@@ -239,18 +559,7 @@ class FileManager:
         if not file_info:
             return None
 
-        # Resolve original path (reuse logic from get_file_data)
-        normalized_path = str(file_info.file_path).replace('\\', '/')
-        storage_prefix = str(self.storage_path).replace('\\', '/') + '/'
-        if normalized_path.startswith('data/files/'):
-            relative_path = normalized_path.replace('data/files/', '')
-            original_path = self.storage_path / relative_path
-        elif normalized_path.startswith(storage_prefix):
-            original_path = Path(normalized_path)
-        elif Path(normalized_path).is_absolute():
-            original_path = Path(normalized_path)
-        else:
-            original_path = self.storage_path / normalized_path
+        original_path = self._resolve_file_disk_path(file_info.file_path)
 
         thumb_path = self._thumb_path_for(original_path)
         target = thumb_path if thumb_path.exists() else original_path
@@ -284,8 +593,13 @@ class FileManager:
         logger.info(f"Saving file: {original_name} ({len(file_data)} bytes) by user {uploaded_by}")
         
         try:
-            # Sanitize filename to prevent path traversal
-            original_name = self._sanitize_filename(original_name)
+            # Normalize incoming metadata so generic agent uploads don't degrade
+            # into name=file/type=application/octet-stream attachments.
+            original_name, content_type = self._normalize_incoming_metadata(
+                file_data=file_data,
+                original_name=original_name,
+                content_type=content_type,
+            )
 
             # Validate file size
             if len(file_data) > self.max_file_size:
@@ -384,7 +698,7 @@ class FileManager:
                     logger.warning(f"File not found: {file_id}")
                     return None
                 
-                return FileInfo(
+                file_info = FileInfo(
                     id=row['id'],
                     original_name=row['original_name'],
                     stored_name=row['stored_name'],
@@ -396,7 +710,8 @@ class FileManager:
                     url=f"/files/{row['id']}",
                     checksum=row['checksum']
                 )
-                
+                return self._backfill_generic_file_metadata(file_info)
+
         except Exception as e:
             logger.error(f"Failed to retrieve file {file_id}: {e}", exc_info=True)
             return None
@@ -418,25 +733,7 @@ class FileManager:
             if not file_info:
                 return None
             
-            # Normalize file path (handle Windows/Linux path separators)
-            # Convert Windows backslashes to forward slashes
-            normalized_path = str(file_info.file_path).replace('\\', '/')
-            
-            # If path is relative (starts with 'data/files/'), reconstruct from storage_path
-            storage_prefix = str(self.storage_path).replace('\\', '/') + '/'
-            if normalized_path.startswith('data/files/'):
-                # Extract the relative part (e.g., 'images/F3e9c46b22481533ccb1bb31f.jpeg')
-                relative_path = normalized_path.replace('data/files/', '')
-                file_path = self.storage_path / relative_path
-            elif normalized_path.startswith(storage_prefix):
-                # Path already includes storage_path prefix (device-specific) — use as-is from CWD
-                file_path = Path(normalized_path)
-            elif Path(normalized_path).is_absolute():
-                # Absolute path - use as is
-                file_path = Path(normalized_path)
-            else:
-                # Relative path - assume it's relative to storage_path
-                file_path = self.storage_path / normalized_path
+            file_path = self._resolve_file_disk_path(file_info.file_path)
             
             # Check if file exists on disk
             if not file_path.exists():

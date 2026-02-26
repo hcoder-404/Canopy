@@ -100,6 +100,79 @@ class Message:
     expires_at: Optional[datetime] = None
     origin_peer: Optional[str] = None
 
+    @staticmethod
+    def normalize_attachment(attachment: Any) -> Optional[Dict[str, Any]]:
+        """Return a canonical attachment dict for UI/API compatibility.
+
+        Canonical keys are:
+        - id (or file_id alias)
+        - name
+        - type
+        - size
+        - url (optional)
+
+        Agents sometimes send attachment metadata using upload-response keys
+        (file_id, filename, content_type). This normalizer preserves backward
+        compatibility by mapping aliases into canonical fields.
+        """
+        if isinstance(attachment, str):
+            file_id = attachment.strip()
+            if not file_id:
+                return None
+            return {
+                'id': file_id,
+                'file_id': file_id,
+                'name': file_id,
+                'type': 'application/octet-stream',
+            }
+
+        if not isinstance(attachment, dict):
+            return None
+
+        att = dict(attachment)
+        file_id = att.get('id') or att.get('file_id')
+        if file_id:
+            file_id_str = str(file_id).strip()
+            if file_id_str:
+                att['id'] = file_id_str
+                att.setdefault('file_id', file_id_str)
+
+        name = (
+            att.get('name')
+            or att.get('filename')
+            or att.get('original_name')
+            or att.get('file_name')
+        )
+        if name:
+            att['name'] = str(name)
+
+        content_type = (
+            att.get('type')
+            or att.get('content_type')
+            or att.get('mime_type')
+            or att.get('mime')
+        )
+        if content_type:
+            att['type'] = str(content_type)
+
+        if 'size' in att and att.get('size') is not None:
+            try:
+                att['size'] = int(att.get('size'))
+            except (TypeError, ValueError):
+                pass
+
+        return att
+
+    @classmethod
+    def normalize_attachments(cls, attachments: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+        """Normalize an attachment list while preserving unknown extra keys."""
+        normalized: List[Dict[str, Any]] = []
+        for attachment in attachments or []:
+            att = cls.normalize_attachment(attachment)
+            if att:
+                normalized.append(att)
+        return normalized
+
     @property
     def is_expired(self) -> bool:
         """Return True if this message has expired."""
@@ -113,6 +186,7 @@ class Message:
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert message to dictionary."""
+        attachments = self.normalize_attachments(self.attachments)
         return {
             'id': self.id,
             'channel_id': self.channel_id,
@@ -124,7 +198,7 @@ class Message:
             'thread_id': self.thread_id,
             'parent_message_id': self.parent_message_id,
             'reactions': self.reactions or {},
-            'attachments': self.attachments or [],
+            'attachments': attachments,
             'security': self.security or {},
             'edited_at': self.edited_at.isoformat() if self.edited_at else None,
             'origin_peer': self.origin_peer,
@@ -1661,6 +1735,12 @@ class ChannelManager:
             if sec_error:
                 logger.warning(f"Dropping invalid security metadata for channel {channel_id}: {sec_error}")
             security = security_clean
+
+            normalized_attachments = Message.normalize_attachments(attachments)
+            if normalized_attachments:
+                message_type = MessageType.FILE
+            else:
+                normalized_attachments = None
             
             # Generate unique message ID
             message_id = f"M{secrets.token_hex(12)}"
@@ -1687,7 +1767,7 @@ class ChannelManager:
                 created_at=created_at,
                 thread_id=thread_id,
                 parent_message_id=parent_message_id,
-                attachments=attachments,
+                attachments=normalized_attachments,
                 security=security,
                 expires_at=expires_dt,
                 origin_peer=origin_peer,
@@ -1706,7 +1786,7 @@ class ChannelManager:
                     """, (
                         message_id, channel_id, user_id, content, message_type.value,
                         thread_id, parent_message_id,
-                        json.dumps(attachments) if attachments else None,
+                        json.dumps(normalized_attachments) if normalized_attachments else None,
                         json.dumps(security) if security else None,
                         created_db,
                         origin_peer,
@@ -1758,6 +1838,7 @@ class ChannelManager:
                             final_attachments = json.loads(row['attachments'])
                         except Exception:
                             final_attachments = None
+                final_attachments = Message.normalize_attachments(final_attachments) if final_attachments else None
 
                 if final_attachments:
                     final_message_type = MessageType.FILE.value

@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ---
 
+## [0.4.10] - 2026-02-26
+
+### Fixed
+- **Avatar rendering restored** — Profile avatars and file attachments that were stored with legacy relative device-scoped paths (`data/devices/<id>/files/...`) are now resolved correctly. `FileManager` gained `_candidate_storage_roots()` and `_resolve_file_disk_path()` which probe the stored path against all plausible roots (current storage, legacy shared, device-scoped alternates, and per-category basename fallback) so no file row returns 404 due to a mismatched root prefix. Both `get_file_data()` and `get_thumbnail_data()` use the resolver.
+- **Attachment metadata normalisation** — Channel messages posted by agents or API clients using upload-response field names (`file_id`, `filename`, `content_type`, `mime_type`) now render identically to UI-posted attachments. `Message.normalize_attachment()` and `normalize_attachments()` map all known aliases to canonical keys (`id`, `name`, `type`). Applied in `to_dict()`, `send_message()`, and `update_message()`; `MessageType.FILE` is forced automatically when normalized attachments are present.
+- **Markdown/JSON file icons** — `getFileIcon()` in the channel and direct-message UIs now recognises `text/markdown`, `text/x-markdown` (→ `filetype-md`) and JSON MIME types (→ `filetype-json`) directly from the MIME string, so agent-uploaded markdown and JSON files show the correct icon even when the filename extension is absent.
+
+---
+
 ## [0.4.9] - 2026-02-26
 
 ### Fixed

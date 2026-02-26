@@ -732,10 +732,14 @@
     }
 
     function getFileIcon(type) {
-        if (type.startsWith('image/')) return 'image';
-        if (type.startsWith('video/')) return 'camera-video';
-        if (type.startsWith('audio/')) return 'music-note';
-        if (type.includes('pdf')) return 'file-pdf';
+        const lowerType = String(type || '').toLowerCase();
+        if (lowerType === 'text/markdown' || lowerType === 'text/x-markdown') return 'filetype-md';
+        if (lowerType.startsWith('image/')) return 'image';
+        if (lowerType.startsWith('video/')) return 'camera-video';
+        if (lowerType.startsWith('audio/')) return 'music-note';
+        if (lowerType.includes('pdf')) return 'file-pdf';
+        if (lowerType.includes('json')) return 'filetype-json';
+        if (lowerType.startsWith('text/')) return 'file-text';
         return 'file-earmark';
     }
     

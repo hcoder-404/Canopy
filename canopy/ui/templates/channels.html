@@ -6121,12 +6121,17 @@ function toggleFilePreview(previewId, url, isMarkdown) {
 }
 
 function getFileIcon(type, name) {
-    if (type && type.startsWith('image/')) return 'image';
-    if (type && type.startsWith('video/')) return 'camera-video';
-    if (type && type.startsWith('audio/')) return 'music-note';
-    if (type && type.includes('pdf')) return 'file-pdf';
+    const lowerType = String(type || '').toLowerCase();
+    if (lowerType === 'text/markdown' || lowerType === 'text/x-markdown') return 'filetype-md';
+    if (lowerType.startsWith('image/')) return 'image';
+    if (lowerType.startsWith('video/')) return 'camera-video';
+    if (lowerType.startsWith('audio/')) return 'music-note';
+    if (lowerType.includes('pdf')) return 'file-pdf';
+    if (lowerType.includes('json')) return 'filetype-json';
+    if (lowerType.startsWith('text/')) return 'file-text';
     if (name) {
         const lower = name.toLowerCase();
+        if (lower.endsWith('.pdf')) return 'file-pdf';
         if (lower.endsWith('.md')) return 'filetype-md';
         if (lower.endsWith('.json')) return 'filetype-json';
         if (lower.endsWith('.py')) return 'filetype-py';
